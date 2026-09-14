@@ -4,6 +4,38 @@ Vital-signs monitoring from the **armrest of a wheelchair**: the user rests thei
 
 ---
 
+## Where this fits in the full system
+
+The complete project has three cooperating components. **This repository is the vital-signs monitoring subsystem** — the layer that turns raw sensor signals into validated readings and alerts.
+
+```
+Armrest sensors ──▶ Validation engine ──▶ Screen (live readings + alerts)
+                           │
+                           └──▶ Validated data ──▶ AI rehabilitation model
+Chair camera ─────▶ Gaze direction mapping ──▶ Screen (gaze-driven interaction)
+```
+
+| Component | What it does | Where |
+|---|---|---|
+| **Vital-signs monitoring** | Reads heart rate, blood oxygen, wrist skin temperature and movement; validates every reading; raises the four safety alerts; logs and exports the data | **this repository** |
+| **Gaze direction mapping** | A camera on the chair tracks where the user is looking and maps it to screen coordinates, so the screen can be used without hands | partner module |
+| **AI rehabilitation** | Learns from the validated vital signs, movement patterns and response to alerts, and predicts a rehabilitation programme personalised to each user rather than a generic plan | partner module |
+
+### The AI layer and why validation comes first
+
+The rehabilitation model is only as good as the data it learns from. A sensor with no wrist on it still emits plausible-looking numbers; a frozen sensor repeats the same value; a hand tremor produces sudden jumps. If those reached the model, it would learn from noise and recommend with false confidence.
+
+That is why the AI layer never reads raw sensor output. It receives **only what passed the validation engine**:
+
+- `measurements.csv` — one row per sample containing validated readings only, with an empty cell (never a zero) wherever a reading was withheld, so no artificial value can enter a training set.
+- `audit_log.jsonl` — every rejected reading with its raw value and reason, every alert raised and cleared with its duration, and the thresholds in force for the session.
+
+From these the model has what it needs to personalise: the user's own resting baselines, how long they stay immobile and how quickly they respond to a movement prompt, how often the wrist-pressure reminder fires, and how the readings trend across sessions. Because every row carries the threshold snapshot that produced it, the model can also be retrained correctly when thresholds are tuned on real hardware.
+
+The three components share the armrest screen: validated readings and alerts are displayed there, and gaze mapping lets the user interact with it.
+
+---
+
 ## Running
 
 Requirements: **Python 3.8+**. No external libraries (stdlib only), except `pytest` for the tests.
