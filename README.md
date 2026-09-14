@@ -1,47 +1,48 @@
-# حسّاس مسند كرسي ذوي الإعاقة — بروتوتايب برمجي
+# Wheelchair Armrest Vital-Signs Monitor — Software Prototype
 
-مراقبة مؤشّرات حيوية من **مسند يد الكرسي المتحرك**: المستخدم يستند بمعصمه على المسند فتُقاس منه القراءات باستمرار، مع تنبيهه للحركة (تنشيط الدورة الدموية والوقاية من تقرّحات الفراش).
+Vital-signs monitoring from the **armrest of a wheelchair**: the user rests their wrist on the armrest and readings are taken continuously, with prompts to move (circulation and pressure-injury prevention).
 
 ---
 
-## التشغيل
+## Running
 
-المتطلبات: **Python 3.8+**. لا مكتبات خارجية (stdlib فقط)، عدا `pytest` للاختبارات.
+Requirements: **Python 3.8+**. No external libraries (stdlib only), except `pytest` for the tests.
 
 ```bash
 python demo.py
 ```
-تشغيل كامل في الطرفية: 120 عيّنة (ساعة افتراضية) تمرّ على كل حالات الأعطال، ثم ملخّص إحصائي وسجلّ تدقيق.
+Full run in the terminal: 120 samples (one virtual hour) passing through every fault state, then a statistical summary and an audit log.
 
 ```bash
 python screen.py
 ```
-الشاشتان معًا على خادم محلي:
-- **شاشة المستخدم** ⟵ `http://127.0.0.1:8770/`
-- **شاشة المرافق** ⟵ `http://127.0.0.1:8770/family`
+Both screens on a local server:
+- **User screen** ⟵ `http://127.0.0.1:8770/`
+- **Caregiver screen** ⟵ `http://127.0.0.1:8770/family`
 
-| خيار | الافتراضي | المعنى |
+| Option | Default | Meaning |
 |---|---|---|
-| `--port` | 8770 | منفذ الخادم |
-| `--period` | 0.5 | ثوانٍ **حقيقية** بين عيّنتين على الشاشة |
-| `--sample-period` | 30 | ثوانٍ **افتراضية** بين عيّنتين (ساعة الحسّاس) |
-| `--cycle-samples` | 120 | طول دورة السيناريو قبل إعادة حقن الأعطال |
-| `--seed` | 42 | بذرة التوليد العشوائي |
-| `--log` | `audit_log.jsonl` | مسار سجلّ التدقيق |
-| `--csv` | (معطّل) | مسار تصدير القياسات |
-| `--no-browser` | — | لا تفتح المتصفّح تلقائيًا |
+| `--port` | 8770 | server port |
+| `--period` | 0.5 | **real** seconds between two samples on screen |
+| `--sample-period` | 30 | **virtual** seconds between two samples (sensor clock) |
+| `--cycle-samples` | 120 | scenario length before faults are re-injected |
+| `--seed` | 42 | random seed |
+| `--log` | `audit_log.jsonl` | audit log path |
+| `--csv` | (off) | measurement export path |
+| `--clean` | — | run without fault injection (continuous clean readings) |
+| `--no-browser` | — | do not open the browser automatically |
 
-عند `--period 0.5` تكتمل الساعة الافتراضية خلال دقيقة واحدة، فتظهر كل حالات العرض والإنذارات بالتتابع ثم تُعاد.
+At `--period 0.5` the virtual hour completes in one real minute, so every display state and alert appears in sequence, then the cycle repeats.
 
 ```bash
 python -m pytest -q
 ```
-**141 اختبارًا.** كل اختبار يحرس قرارًا طبيًا لا تفصيلًا برمجيًا.
-(`pip install -r requirements.txt` — التشغيل نفسه بلا مكتبات خارجية.)
+**141 tests.** Each one guards a medical decision, not a programming detail.
+(`pip install -r requirements.txt` — running the system itself needs no external libraries.)
 
 ---
 
-## المعمارية
+## Architecture
 
 ```
 Sensor ⟶ Validator ⟶ Display ⟶ Screen
@@ -49,87 +50,87 @@ Sensor ⟶ Validator ⟶ Display ⟶ Screen
            Logger
 ```
 
-**قاعدة السلامة الثابتة:** الشاشة تقرأ من **مخرجات المدقّق فقط**. لا رقم خام غير متحقَّق يصل عين المستخدم — بلا استثناء.
+**Fixed safety rule:** the screen reads from **validator output only**. No raw, unverified number reaches the user's eyes — no exceptions.
 
-| الملف | الدور |
+| File | Role |
 |---|---|
-| `interface.py` | `VitalSample` + `SensorInterface` — **نقطة تبديل المحاكاة بالعتاد** |
-| `mock_sensor.py` | حسّاس وهمي بقراءات واقعية وحقن أعطال مقصود |
-| `validator.py` | **محرّك التدقيق — قلب النظام** |
-| `display.py` | منطق العرض الخالص (بلا رسم): ماذا يُعرض ومتى |
-| `screen.py` | الراسم: شاشة المستخدم وشاشة المرافق (صفحة ويب محلية) |
-| `logger.py` | سجلّ التدقيق الطبي (JSON Lines) |
-| `exporter.py` | تصدير القياسات للتحليل (CSV + لقطة عتبات) |
-| `i2c_sensor.py` | طبقة العتاد: MAX30102 + MAX30205 + MPU-6050 عبر I²C (غير مختبرة على جهاز بعد) |
-| `demo.py` | تشغيل end-to-end في الطرفية + إحصاء |
-| `test_*.py` | الإثبات الآلي |
+| `interface.py` | `VitalSample` + `SensorInterface` — **the swap point between simulation and hardware** |
+| `mock_sensor.py` | Mock sensor with realistic readings and deliberate fault injection |
+| `validator.py` | **Validation engine — the core of the system** |
+| `display.py` | Pure display logic (no rendering): what is shown and when |
+| `screen.py` | Renderer: user screen and caregiver screen (local web page) |
+| `logger.py` | Medical audit log (JSON Lines) |
+| `exporter.py` | Measurement export for analysis (CSV + threshold snapshot) |
+| `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C (not yet tested on a device) |
+| `demo.py` | End-to-end terminal run + statistics |
+| `test_*.py` | Automated proof |
 
 ---
 
-## منطق المدقّق
+## Validator logic
 
-### فصل صارم بين نوعي الخطأ
-| النوع | المعنى | النتيجة |
+### Strict separation of two kinds of error
+| Kind | Meaning | Result |
 |---|---|---|
-| **SANITY** | مستحيل فيزيائيًا / `None` / `NaN` | `INVALID` — **تُرمى القيمة** |
-| **CLINICAL** | ممكنة لكن شاذّة | `WARN` — **تُحفظ وتُعرض مع تمييز** |
+| **SANITY** | physically impossible / `None` / `NaN` | `INVALID` — **value discarded** |
+| **CLINICAL** | possible but abnormal | `WARN` — **value kept and shown with emphasis** |
 
-خلط النوعين خطأ طبي: نبض 45 قراءة حقيقية تستحق العرض والتنبيه، ونبض 320 عطل حسّاس يُرمى.
+Mixing the two is a medical error: a heart rate of 45 is a real reading that deserves display and a warning; 320 is a sensor fault to be discarded.
 
-وفحصان ذوا ذاكرة: `STUCK` (تجمّد الحسّاس) و`ARTIFACT` (قفزة مفاجئة = رعشة أو حركة).
+Plus two checks with memory: `STUCK` (frozen sensor) and `ARTIFACT` (sudden jump = tremor or movement).
 
-### بوابة التلامس
-`ir_dc` دون العتبة ⟵ `NO_CONTACT` وتُصفَّر **كل** قيم المعصم مهما بدت منطقية — الحسّاس بلا معصم يطلّع ضوضاء تشبه القراءة الحقيقية. والبوابة تُغلق عند الشك، وتميّز **رفع المعصم** (سلوك عادي) عن **قيمة خارج مدى العتاد** (عطب يستدعي صيانة).
+### Contact gate
+`ir_dc` below the threshold ⟵ `NO_CONTACT` and **every** wrist value is blanked however plausible it looks — a sensor with no wrist on it outputs noise that resembles a real reading. The gate closes on doubt, and it distinguishes **a lifted wrist** (normal behaviour) from **a value outside the hardware range** (a fault needing maintenance).
 
-### الإنذارات — أربعة مؤقّتات مستقلة
-| الإنذار | ينطلق عند | يُصفَّر بـ |
+### Alerts — four independent timers
+| Alert | Fires on | Reset by |
 |---|---|---|
-| `NEEDS_MOVEMENT` | خمول 15 دقيقة | حركة مؤكَّدة فوق العتبة |
-| `LIFT_WRIST` | استناد متصل 15 دقيقة | **رفع المعصم وحده** |
-| `SENSOR_FAULT` | `ir_dc` خارج مدى العتاد | (فوري) |
-| `MEASUREMENT_SILENT` | 15 دقيقة بلا رقم صالح | أي قراءة صالحة |
+| `NEEDS_MOVEMENT` | 15 min immobility | confirmed movement above the threshold |
+| `LIFT_WRIST` | 15 min continuous wrist rest | **lifting the wrist only** |
+| `SENSOR_FAULT` | `ir_dc` outside the hardware range | (immediate) |
+| `MEASUREMENT_SILENT` | 15 min without a valid number | any valid reading |
 
-كل المؤقّتات **مُراكِمة** لا مشتقّة من طوابع زمنية محفوظة، فرجوع ساعة الحسّاس للخلف (إعادة تشغيل المتحكّم) لا يُضيّع مدّة متراكمة ولا يكتم إنذارًا قائمًا.
+All timers are **accumulators**, not derived from stored timestamps, so a sensor clock jumping backwards (an MCU reboot) neither loses accumulated time nor silences an active alert.
 
-المخرجات تفصل `flags` (جودة بيانات) عن `alerts` (إجراء مطلوب): النبض قد يكون `VALID` والإنذار شغّالًا في اللحظة نفسها.
+The output separates `flags` (data quality) from `alerts` (action required): heart rate can be `VALID` while an alert is active at the same instant.
 
 ---
 
-## طبقة العرض
+## Display layer
 
-| الحالة | شاشة المستخدم |
+| State | User screen |
 |---|---|
-| `VALID` | الرقم عاديًا |
-| `WARN` | الرقم + **لون وأيقونة ونص** (لا اعتماد على اللون وحده) |
-| `NO_CONTACT` | **لا رقم** ⟵ "ضع معصمك على المسند" |
-| `INVALID` | **لا رقم** ⟵ "تعذّرت القراءة" |
-| إنذار | شريط واضح + صوت |
+| `VALID` | the number, normally |
+| `WARN` | the number + **colour, icon and text** (never colour alone) |
+| `NO_CONTACT` | **no number** ⟵ "Rest your wrist on the armrest" |
+| `INVALID` | **no number** ⟵ "Reading unavailable" |
+| alert | a clear banner + sound |
 
-**"لا قراءة" أصدق من قراءة مغلوطة.** بطاقة محجوبة لا تحمل رقمًا أبدًا: لا رقم قديم ولا صفر. وانقطاع مصدر الحالة يمسح كل الأرقام فورًا — شاشة متجمّدة على آخر رقم تُقرأ كقياس حيّ، وهي أخطر من شاشة فارغة.
+**"No reading" is more honest than a wrong reading.** A blocked card never carries a number: no stale value, no zero. Loss of the state source wipes every number immediately — a screen frozen on the last number reads as a live measurement, which is more dangerous than an empty one.
 
-**شاشة المرافق** ملخّص "ما يستدعي التدخّل" لا نسخة ثانية: الإنذارات ومدّتها ⟵ الشاذّ ⟵ المتعذّر ⟵ السليم. تُشتقّ من نفس النموذج، فلا تكشف رقمًا حجبته شاشة المستخدم. ولها ثلاث حالات: **يحتاج انتباهك** / **لا تصل قراءات الآن** / **لا يوجد ما يستدعي التدخّل** — إعلان الاطمئنان بينما لا يصل رقم طمأنة كاذبة.
+**The caregiver screen** is a summary of "what needs intervention", not a second copy: alerts and their duration ⟵ abnormal ⟵ unavailable ⟵ valid. It is derived from the same model, so it never reveals a number the user screen withheld. It has three states: **Needs your attention** / **No readings right now** / **Nothing needs attention** — announcing reassurance while no number arrives is false reassurance.
 
 ---
 
-## سجلّ التدقيق
+## Audit log
 
-`audit_log.jsonl` — سطر لكل حدث (JSON Lines)، **بالإلحاق لا الاستبدال**:
+`audit_log.jsonl` — one line per event (JSON Lines), **appended, never overwritten**:
 
-| الحدث | المحتوى |
+| Event | Content |
 |---|---|
-| `session_start` | **لقطة كل العتبات السارية** — قرار بلا عتبته لا يُدقَّق |
-| `rejected` | القراءة المرفوضة **بقيمتها الخام** وسبب رفضها |
-| `no_contact` | فقد التلامس + أعلام تميّز رفع المعصم عن عطب العتاد |
-| `warn` | القراءة الشاذّة التي عُرضت |
-| `alert_raised` / `alert_cleared` | تحوّلات الإنذارات ومدّتها |
+| `session_start` | **a snapshot of every threshold in force** — a decision without its threshold cannot be audited |
+| `rejected` | the rejected reading **with its raw value** and the reason |
+| `no_contact` | contact loss + flags distinguishing a lifted wrist from a hardware fault |
+| `warn` | the abnormal reading that was displayed |
+| `alert_raised` / `alert_cleared` | alert transitions and their duration |
 
-`NaN` و`inf` تُكتب نصًّا صريحًا لا `null` — الفرق مقصود: `null` تعني "لم تصل قيمة"، و`"NaN"` تعني "وصلت قيمة تالفة". سببان مختلفان للرفض.
+`NaN` and `inf` are written as explicit text, not `null` — the difference is deliberate: `null` means "no value arrived", `"NaN"` means "a corrupt value arrived". Two different reasons for rejection.
 
 ---
 
-## تصدير القياسات
+## Measurement export
 
-`measurements.csv` — صفّ لكل عيّنة، يكتبه `demo.py` تلقائيًا (وفي `screen.py` بخيار `--csv`).
+`measurements.csv` — one row per sample, written automatically by `demo.py` (and by `screen.py` with `--csv`).
 
 ```
 t_s,contact,heart_rate_bpm,heart_rate_status,spo2_pct,spo2_status,...,flags,alerts
@@ -137,69 +138,69 @@ t_s,contact,heart_rate_bpm,heart_rate_status,spo2_pct,spo2_status,...,flags,aler
 330.0,0,,NO_CONTACT,,NO_CONTACT,...,NO_CONTACT,
 ```
 
-⚠️ **الخانة الفارغة تعني "لا قياس"، لا "قياس قيمته صفر".** الصفر قيمة قياس والفراغ غيابه، وخلطهما يُدخل نبضًا = 0 في متوسط التحليل ويوهم بقراءة لم تحدث. عمود `*_status` يبيّن السبب (`INVALID` / `NO_CONTACT`)، وتفصيله وقيمته الخام في `audit_log.jsonl`.
+⚠️ **An empty cell means "no measurement", not "a measurement of zero".** A zero is a measured value and an empty cell is its absence; mixing them puts heart rate = 0 into an analysis mean and implies a reading that never happened. The `*_status` column gives the reason (`INVALID` / `NO_CONTACT`); the detail and raw value are in `audit_log.jsonl`.
 
-يُكتب معه **`measurements.csv.meta.json`**: العتبات السارية. **بيانات بلا عتباتها لا تُفسَّر** — عمود `status` بلا معرفة الحدّ الذي أنتجه رقم بلا معنى بعد شهر.
+A companion **`measurements.csv.meta.json`** is written with the thresholds in force. **Data without its thresholds cannot be interpreted** — a `status` column without the bound that produced it is meaningless a month later.
 
-| الملف | يجيب عن |
+| File | Answers |
 |---|---|
-| `measurements.csv` | ما القراءات عبر الجلسة؟ |
-| `audit_log.jsonl` | لماذا لم يرَ المستخدم رقمًا في تلك اللحظة؟ |
+| `measurements.csv` | what were the readings across the session? |
+| `audit_log.jsonl` | why did the user not see a number at that moment? |
 
-> صيغة المخرجات النهائية لم تُحدَّد من الشركة؛ CSV اختيار مبدئي يسهل تحويله.
+> The final output format has not been specified by the client; CSV is an initial choice that converts easily.
 
-## تبديل العتبات
+## Changing thresholds
 
-كل العتبات في `validator.py` **ولا تُكرَّر في أي مكان آخر**:
+Every threshold lives in `validator.py` **and is duplicated nowhere else**:
 
-- **المؤقّتات وبوابة التلامس:** ثوابت أعلى الملف (`IMMOBILITY_LIMIT_S`, `WRIST_REST_LIMIT_S`, `SILENCE_LIMIT_S`, `CONTACT_IR_THRESHOLD`, `MOVEMENT_THRESHOLD`).
-- **الحدود السريرية والفيزيائية:** `FIELD_SPECS`.
+- **Timers and the contact gate:** constants at the top of the file (`IMMOBILITY_LIMIT_S`, `WRIST_REST_LIMIT_S`, `SILENCE_LIMIT_S`, `CONTACT_IR_THRESHOLD`, `MOVEMENT_THRESHOLD`).
+- **Clinical and physical bounds:** `FIELD_SPECS`.
 
-بعد التبديل: `python -m pytest -q` ثم `python demo.py` لمراجعة أثر التغيير على معدّل القبول. والعتبات الجديدة تُسجَّل تلقائيًا في لقطة بداية الجلسة.
+After changing them: `python -m pytest -q`, then `python demo.py` to review the effect on the acceptance rate. New thresholds are recorded automatically in the session-start snapshot.
 
 ---
 
-## تبديل المحاكاة بالعتاد
+## Swapping simulation for hardware
 
-النظام **simulation-first**: المنطق كله تحقَّق قبل وصول العتاد. الانتقال يمسّ ملفًا واحدًا:
+The system is **simulation-first**: all logic was verified before the hardware. The transition touches one file:
 
 ```python
 from interface import SensorInterface, VitalSample
 
 class I2CSensor(SensorInterface):
     def start(self) -> None:
-        ...  # تهيئة I2C وتشغيل LEDs
+        ...  # I2C init, LED power-on
 
     def read(self) -> VitalSample:
-        # تُعيد العيّنة **كما هي** — بلا تنقية ولا تصحيح ولا إخفاء.
-        # التدقيق مسؤولية Validator وحده.
+        # Return the sample **as-is** — no filtering, no correction, no hiding.
+        # Validation is the Validator's responsibility alone.
         return VitalSample(t=..., ir_dc=..., heart_rate=...,
                            spo2=..., skin_temp=..., movement=...)
 
     def stop(self) -> None:
-        ...  # إغلاق نظيف
+        ...  # clean shutdown
 ```
 
-ثم استبدل `MockSensor(...)` بـ `I2CSensor(...)` في `demo.py` و`screen.py`. **لا يُلمس المدقّق ولا الشاشة.**
+Then replace `MockSensor(...)` with `I2CSensor(...)` in `demo.py` and `screen.py`. **The validator and the screen are untouched.**
 
-بعدها تلزم معايرة `CONTACT_IR_THRESHOLD` و`MOVEMENT_THRESHOLD` على العتاد الفعلي.
-
----
-
-## قرارات مثبّتة في التصميم
-
-قرارات اتُّخذت عمدًا وقد تبدو مخالفة للحدس:
-
-- **`skin_temp` لا `body_temp`** — الاسم يصف ما يُقاس فعلًا. التسمية المضلِّلة خطأ طبي.
-- **"المستخدم" لا "المريض"** — الجهاز لذوي الإعاقة، ومستخدم الكرسي ليس بالضرورة مريضًا.
-- **الشاشة ويب لا سطح مكتب** — لأن Tk على ويندوز لا يصل الحروف العربية، وشاشة غير مقروءة تُفشل الغرض.
-- **حركة غير مؤكَّدة تُبقي المؤقّت شغّالًا** (fail-loud) — تنبيه زائد للحركة غير ضار، وكتم الإنذار خطر تقرّحات.
-- **الحركة لا تُعرض للمستخدم** — مؤشّر داخلي يقود الإنذار، لا رقم يعني المستخدم شيئًا.
+A ready implementation for MAX30102 + MAX30205 + MPU-6050 is in `i2c_sensor.py` (requires `pip install smbus2` on the Raspberry Pi). Afterwards `CONTACT_IR_THRESHOLD` and `MOVEMENT_THRESHOLD` need calibrating on the real hardware.
 
 ---
 
-## الحالة والمتبقي
+## Deliberate design decisions
 
-**مكتمل:** النواة، سجلّ التدقيق، تصدير القياسات، شاشة المستخدم، شاشة المرافق، الإنذارات الأربعة، 141 اختبارًا.
+Decisions taken on purpose that may look counter-intuitive:
 
-**متبقٍّ (معلّق على العتاد أو على قرار طبي):** تجربة طبقة العتاد `I2CSensor` على الجهاز، فلترة الإشارة، تثبيت العتبات غير المعايرة، وسياسة التصعيد.
+- **`skin_temp`, not `body_temp`** — the name describes what is actually measured. A misleading name is a medical error.
+- **"User", not "patient"** — the device is for people with disabilities, and a wheelchair user is not necessarily ill.
+- **A web screen, not a desktop window** — reliable large type, high contrast and bidirectional text; closest to the real product (a tablet on the chair).
+- **Unverified movement keeps the timer running** (fail-loud) — an extra movement prompt is harmless; a silenced alert is a pressure-injury risk.
+- **Movement is never shown to the user** — an internal indicator that drives the alert, not a number that means anything to them.
+
+---
+
+## Status and what remains
+
+**Complete:** the core, the audit log, measurement export, the user screen, the caregiver screen, the four alerts, 141 tests.
+
+**Remaining (pending hardware or a medical decision):** trying the `I2CSensor` hardware layer on the device, signal filtering, fixing the uncalibrated thresholds, and the escalation policy.

@@ -1,18 +1,19 @@
 """
-تصدير القياسات — ملف بيانات للتحليل اللاحق.
+Measurement export — a data file for later analysis.
 
-يختلف عن `logger.py` اختلافًا جوهريًا:
-  - `audit_log.jsonl` **سجلّ تدقيق**: يوثّق ما رُفض ولماذا، بقيمته الخام.
-  - `measurements.csv` **بيانات قياس**: صفّ لكل عيّنة بما اجتاز التدقيق.
-الأول يجيب "لماذا لم يرَ المستخدم رقمًا"، والثاني يجيب "ما القراءات عبر الجلسة".
+Fundamentally different from `logger.py`:
+  - `audit_log.jsonl` is an **audit trail**: it records what was rejected and why, with the raw value.
+  - `measurements.csv` is **measurement data**: one row per sample containing what passed validation.
+The first answers "why did the user not see a number"; the second answers "what were the readings across the session".
 
-قاعدة السلامة نفسها سارية هنا: **لا يُصدَّر رقم لم يجتز المدقّق.** الحقل المرفوض
-تُترك خانته **فارغة**، ولا تُملأ بصفر — الصفر قيمة قياس، والفراغ غياب قياس،
-وخلطهما يفسد أي تحليل لاحق ويوهم بقراءة لم تحدث.
+The same safety rule applies here: **no number that failed validation is exported.**
+A rejected field leaves its cell **empty**, never filled with a zero — a zero is a
+measured value, an empty cell is the absence of one, and mixing them corrupts
+any later analysis and implies a reading that never happened.
 
-يُكتب معه ملف `<الاسم>.meta.json` يحمل العتبات السارية وحالة المعايرة:
-**بيانات بلا عتباتها لا تُفسَّر** — قراءة مُعلَّمة WARN بلا معرفة الحدّ الذي علّمها
-لا تعني شيئًا بعد شهر.
+A companion `<name>.meta.json` is written with the thresholds in force:
+**data without its thresholds cannot be interpreted** — a reading flagged WARN
+without the bound that flagged it means nothing a month later.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ from typing import Any, Dict, List, Optional, TextIO
 
 from validator import FIELD_SPECS, ValidationResult, Validator
 
-# لاحقة وحدة لكل حقل في ترويسة الـ CSV.
-# صريحة لا مشتقّة من `unit`: رموز مثل ° و% تكسر بعض أدوات التحليل في أسماء الأعمدة.
+# Unit suffix per field in the CSV header.
+# Explicit rather than derived from `unit`: symbols like ° and % break some
+# analysis tools when used in column names.
 _UNIT_SUFFIX: Dict[str, str] = {
     "heart_rate": "bpm",
     "spo2": "pct",
@@ -33,7 +35,7 @@ _UNIT_SUFFIX: Dict[str, str] = {
     "movement": "idx",
 }
 
-_SEP = ";"   # فاصل داخل خانة الأعلام/الإنذارات — الفاصلة محجوزة لبنية الـ CSV
+_SEP = ";"   # separator inside the flags/alerts cell — the comma is reserved for CSV structure
 
 
 def _column(name: str) -> str:
@@ -50,10 +52,11 @@ def header_row() -> List[str]:
 
 class MeasurementExporter:
     """
-    يُستدعى بعد كل validate()، مثل AuditLogger تمامًا. لا يقرّر ولا يصحّح.
+    Called after every validate(), exactly like AuditLogger. Decides nothing, corrects nothing.
 
-    الملف يُفتح بالكتابة لا بالإلحاق: خلط جلستين بعتبتين مختلفتين في ملف واحد
-    يُنتج بيانات لا تُفسَّر. كل جلسة ملفها وملف عتباتها.
+    The file is opened for writing, not appending: mixing two sessions with
+    different thresholds in one file produces uninterpretable data. Each session
+    gets its own file and its own threshold file.
     """
 
     def __init__(
@@ -68,7 +71,7 @@ class MeasurementExporter:
             self._owns_stream = False
             self._meta_path = meta_path
         else:
-            # newline="" شرط وحدة csv لئلا تتضاعف أسطر النهاية على ويندوز.
+            # newline="" is required by the csv module so line endings are not doubled on Windows.
             self._stream = open(path, "w", encoding="utf-8", newline="")
             self._owns_stream = True
             self._meta_path = meta_path or f"{path}.meta.json"
@@ -80,17 +83,17 @@ class MeasurementExporter:
 
     def write_meta(self, validator: Validator) -> Optional[Dict[str, Any]]:
         """
-        لقطة العتبات المصاحبة للبيانات. تُستدعى مرة عند بدء الجلسة.
+        Threshold snapshot accompanying the data. Called once at session start.
 
-        بلا هذا الملف، عمود `*_status` أرقام بلا معنى: لا يُعرف أي حدّ
-        صنّف القراءة WARN.
+        Without this file the `*_status` column is meaningless: there is no way
+        to know which bound classified a reading as WARN.
         """
         meta: Dict[str, Any] = {
             "session_id": self.session_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "notes": {
-                "empty_cell": "خانة فارغة = لا قياس (رُفض أو لا تلامس)، وليست صفرًا",
-                "rejected_values": "القيم المرفوضة وأسبابها في audit_log.jsonl لا هنا",
+                "empty_cell": "empty cell = no measurement (rejected or no contact), not zero",
+                "rejected_values": "rejected values and their reasons are in audit_log.jsonl, not here",
             },
             "thresholds": {
                 "CONTACT_IR_THRESHOLD": validator.contact_ir_threshold,
@@ -118,11 +121,11 @@ class MeasurementExporter:
         return meta
 
     def write(self, result: ValidationResult) -> None:
-        """صفّ واحد لكل عيّنة — من مخرجات المدقّق وحدها."""
+        """One row per sample — from validator output only."""
         row: List[Any] = [round(result.t, 3), 1 if result.contact else 0]
         for name in FIELD_SPECS:
             field = result.fields[name]
-            # الفراغ مقصود: غياب قياس، لا قياس بقيمة صفر.
+            # The empty cell is deliberate: absence of a measurement, not a measurement of zero.
             row.append("" if field.value is None else round(field.value, 3))
             row.append(field.status.value)
         row += [

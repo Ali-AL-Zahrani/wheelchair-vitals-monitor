@@ -1,6 +1,6 @@
-# المحاكاة والشاشتان لا تحتاجان أي مكتبة خارجية — stdlib فقط (Python 3.8+).
-# المكتبة أدناه للاختبارات وحدها.
+# The simulation and both screens need no external library — stdlib only (Python 3.8+).
+# The package below is for the tests only.
 pytest>=7.0
 
-# للعتاد الفعلي على Raspberry Pi (i2c_sensor.py) — غير لازمة للمحاكاة:
+# For real hardware on a Raspberry Pi (i2c_sensor.py) — not needed for the simulation:
 # smbus2>=0.4

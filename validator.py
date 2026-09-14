@@ -1,15 +1,18 @@
 """
-محرّك التدقيق — قلب النظام.
+Validation engine — the core of the system.
 
-ثلاثة أنظمة **مستقلة** تمامًا:
-  1) بوابة التلامس  : لا معصم على المسند ⇒ تُصفَّر كل قيم المعصم بغضّ النظر عن منطقيّتها.
-  2) الفحوصات الحيوية: SANITY (مستحيل) ⇒ INVALID وتُرمى القيمة.
-                       CLINICAL (ممكن لكن شاذّ) ⇒ WARN وتُحفظ القيمة مع تعليم.
-                       + فحصان ذوا ذاكرة: stuck (تجمّد الحسّاس) و artifact (قفزة مفاجئة).
-  3) watchdog الخمول : مستقل عن المعصم كليًا؛ يعتمد على مصدر الحركة المنفصل.
+Three fully **independent** subsystems:
+  1) Contact gate      : no wrist on the armrest ⇒ every wrist value is blanked,
+                         however plausible the numbers look.
+  2) Vital-sign checks : SANITY (impossible) ⇒ INVALID, value discarded.
+                         CLINICAL (possible but abnormal) ⇒ WARN, value kept and flagged.
+                         + two checks with memory: stuck (frozen sensor) and
+                           artifact (sudden jump).
+  3) Temporal monitors : fully independent of the wrist; driven by the separate
+                         movement source.
 
-المخرجات تفصل flags (جودة بيانات) عن alerts (إجراء مطلوب):
-النبض قد يكون VALID وإنذار الحركة شغّال في نفس اللحظة.
+The output separates flags (data quality) from alerts (action required):
+heart rate can be VALID while the movement alert is active at the same moment.
 """
 
 from __future__ import annotations
@@ -22,128 +25,136 @@ from typing import Dict, List, Optional
 from interface import VitalSample
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  عتبات النظام
+#  System thresholds
 # ═══════════════════════════════════════════════════════════════════════════
 
-# عتبة التلامس بنطاق المعصم. ir_dc من المعصم أقل من راحة اليد (تروية شعرية أقل
-# والعظم أقرب تحت الجلد)، وعتبة مرتفعة زيادة تقرأ NO_CONTACT ومعصم المستخدم مستند.
-# مشدودة مع مستوى ir_dc في mock_sensor.py — أي تغيير في أحدهما يوجب الآخر.
+# Contact threshold in the wrist range. ir_dc at the wrist is lower than at the
+# palm (less capillary perfusion, bone closer to the skin); a threshold set too
+# high reads NO_CONTACT while the user's wrist is actually resting.
+# Coupled with the ir_dc level in mock_sensor.py — changing one requires the other.
 CONTACT_IR_THRESHOLD = 20_000.0
 
-# حدّ معقولية لا عتبة سريرية: مدى ADC في MAX30102 ثمانية عشر بتًا (0..262143).
-# قيمة فوقه أو سالبة لا يمكن أن تأتي من الحسّاس، بل من درايفر/ناقل I2C معطوب —
-# وبوابة التلامس تُبنى عليها، فقيمة تالفة قد تفتح البوابة وتُمرّر ضوضاء كقراءات.
+# Plausibility bound, not a clinical threshold: the MAX30102 ADC is 18-bit
+# (0..262143). A value above it, or negative, cannot come from the sensor — only
+# from a broken driver/I2C bus. The contact gate is built on ir_dc, so a corrupt
+# value could open the gate and pass noise through as readings.
 CONTACT_IR_SANITY_MAX = 262_143.0
 
-# ✅ معتمدة من الفريق الطبي (12 أغسطس 2026): تحويل الوزن كل 15 دقيقة.
+# ✅ Approved by the medical team (12 Aug 2026): weight shift every 15 minutes.
 IMMOBILITY_LIMIT_S = 15 * 60.0
 
-# مدّة الاستناد المتصل على المعصم قبل التذكير برفعه — مساوية لحدّ الخمول.
-# مؤقّت مستقل عن حركة الجسم عمدًا: لو رُبط بحدث التحريك، لبقي معصم من لم يحرّكه
-# أحد ساعاتٍ بلا تذكير — أي يغيب التنبيه في اللحظة التي يبلغ فيها الخطر ذروته.
+# Continuous wrist rest before reminding the user to lift it — same as the
+# immobility limit. Deliberately independent of body movement: if it were tied
+# to the movement event, a wrist nobody moved for hours would never be reminded —
+# the alert would vanish exactly when the risk peaks.
 WRIST_REST_LIMIT_S = 15 * 60.0
 
-# ✅ معتمدة من الفريق الطبي (12 أغسطس 2026): 15 دقيقة.
-# طولها مقصود: رقم قصير يولّد إنذارات مزعجة عند كل رفع معصم عادي (أكل، انتقال)،
-# والإنذار المزعج يُطفأ الصوت بسببه ⟵ فيُفقد معه إنذار عطب الحسّاس.
+# ✅ Approved by the medical team (12 Aug 2026): 15 minutes.
+# Deliberately long: a short value produces nuisance alarms on every ordinary
+# wrist lift (eating, transfers); a nuisance alarm gets the sound switched off ⟵
+# and the sensor-fault alarm is lost with it.
 SILENCE_LIMIT_S = 15 * 60.0
 
-# مصدر الحركة: IMU (قرار الفريق الطبي 12 أغسطس). القيمة بوحدات مؤشّر حركة مجرّد.
+# Movement source: IMU (medical team decision, 12 Aug). Value in abstract
+# movement-index units.
 MOVEMENT_THRESHOLD = 0.15
 
-# عدد العيّنات المتطابقة تمامًا التي تعني "الحسّاس متجمّد" (≈5 دقائق عند 30 ث/عيّنة).
+# Number of bit-identical consecutive samples that means "frozen sensor"
+# (≈5 minutes at 30 s/sample).
 STUCK_REPEAT_LIMIT = 10
 
-# بعد هذا العدد من الـ artifacts المتتالية نعتبر التغيّر حقيقيًا ونعيد ضبط الأساس،
-# وإلا بقي الحقل مرفوضًا للأبد بعد أي تغيّر فسيولوجي سريع حقيقي.
+# After this many consecutive artifacts the change is treated as real and the
+# baseline is re-synced; otherwise a field would stay rejected forever after any
+# genuine rapid physiological change.
 ARTIFACT_RESYNC_N = 3
 
 
 class Status(str, Enum):
-    VALID = "VALID"            # اعرض الرقم عاديًا
-    WARN = "WARN"              # اعرض الرقم + تمييز بصري
-    INVALID = "INVALID"        # لا رقم ⟵ "تعذّرت القراءة"
-    NO_CONTACT = "NO_CONTACT"  # لا رقم ⟵ "ضع يدك على المسند"
+    VALID = "VALID"            # show the number normally
+    WARN = "WARN"              # show the number + visual emphasis
+    INVALID = "INVALID"        # no number ⟵ "Reading unavailable"
+    NO_CONTACT = "NO_CONTACT"  # no number ⟵ "Rest your wrist on the armrest"
 
 
-# ── أعلام جودة البيانات (flags) ──
-FLAG_SANITY_MISSING = "SANITY_MISSING"          # القيمة None
-FLAG_SANITY_TYPE = "SANITY_TYPE"                # نوع غير رقمي من الدرايفر
+# ── Data-quality flags ──
+FLAG_SANITY_MISSING = "SANITY_MISSING"          # value is None
+FLAG_SANITY_TYPE = "SANITY_TYPE"                # non-numeric type from the driver
 FLAG_SANITY_NAN = "SANITY_NAN"                  # NaN / inf
-FLAG_SANITY_RANGE = "SANITY_RANGE"              # خارج الممكن فيزيائيًا
-FLAG_CLINICAL_LOW = "CLINICAL_LOW"              # ممكن لكن تحت الحد السريري
-FLAG_CLINICAL_HIGH = "CLINICAL_HIGH"            # ممكن لكن فوق الحد السريري
-FLAG_STUCK = "STUCK"                            # الحسّاس متجمّد على نفس القيمة
-FLAG_ARTIFACT = "ARTIFACT"                      # قفزة مفاجئة = رعشة/حركة
-FLAG_ARTIFACT_RESYNC = "ARTIFACT_RESYNC"        # أُعيد ضبط الأساس بعد قفزات متتالية
-FLAG_NO_CONTACT = "NO_CONTACT"                  # لا يد على المسند
-FLAG_IR_IMPLAUSIBLE = "IR_IMPLAUSIBLE"          # ir_dc خارج مدى الحسّاس ⇒ عطب مصدر لا رفع معصم
-FLAG_MOVEMENT_UNVERIFIED = "MOVEMENT_UNVERIFIED"  # تعذّر التحقق من الحركة
-FLAG_TIME_BACKWARD = "TIME_BACKWARD"            # ساعة الحسّاس رجعت للخلف
+FLAG_SANITY_RANGE = "SANITY_RANGE"              # outside what is physically possible
+FLAG_CLINICAL_LOW = "CLINICAL_LOW"              # possible but below the clinical bound
+FLAG_CLINICAL_HIGH = "CLINICAL_HIGH"            # possible but above the clinical bound
+FLAG_STUCK = "STUCK"                            # sensor frozen on the same value
+FLAG_ARTIFACT = "ARTIFACT"                      # sudden jump = tremor / movement
+FLAG_ARTIFACT_RESYNC = "ARTIFACT_RESYNC"        # baseline re-synced after consecutive jumps
+FLAG_NO_CONTACT = "NO_CONTACT"                  # no wrist on the armrest
+FLAG_IR_IMPLAUSIBLE = "IR_IMPLAUSIBLE"          # ir_dc outside sensor range ⇒ source fault, not a lifted wrist
+FLAG_MOVEMENT_UNVERIFIED = "MOVEMENT_UNVERIFIED"  # movement could not be verified
+FLAG_TIME_BACKWARD = "TIME_BACKWARD"            # sensor clock went backwards
 
-# ── إنذارات (alerts) = إجراء مطلوب من المستخدم ──
-ALERT_NEEDS_MOVEMENT = "NEEDS_MOVEMENT"      # تحويل وزن الجسم عن نقاط الضغط
-ALERT_LIFT_WRIST = "LIFT_WRIST"              # رفع المعصم عن المسند (ضغط موضعي مطوّل)
-ALERT_SENSOR_FAULT = "SENSOR_FAULT"          # عطب في الحسّاس/الناقل — يستدعي صيانة
-ALERT_MEASUREMENT_SILENT = "MEASUREMENT_SILENT"  # لا قياس يصل منذ مدّة
+# ── Alerts = action required from the user ──
+ALERT_NEEDS_MOVEMENT = "NEEDS_MOVEMENT"      # shift body weight off pressure points
+ALERT_LIFT_WRIST = "LIFT_WRIST"              # lift the wrist off the armrest (prolonged local pressure)
+ALERT_SENSOR_FAULT = "SENSOR_FAULT"          # sensor/bus fault — needs maintenance
+ALERT_MEASUREMENT_SILENT = "MEASUREMENT_SILENT"  # no measurement has arrived for a while
 
 
 @dataclass(frozen=True)
 class FieldSpec:
-    """حدود حقل واحد. الفصل بين sanity و clinical مقصود — خلطهما خطأ طبي."""
+    """Bounds for one field. The sanity/clinical split is deliberate — mixing them is a medical error."""
 
     name: str
     unit: str
-    sanity_min: float                       # تحت هذا = مستحيل فيزيائيًا ⇒ ترمى
-    sanity_max: float                       # فوق هذا = مستحيل فيزيائيًا ⇒ ترمى
-    clinical_min: Optional[float]           # تحت هذا = شاذّ لكنه ممكن ⇒ WARN
-    clinical_max: Optional[float]           # فوق هذا = شاذّ لكنه ممكن ⇒ WARN
-    artifact_max_delta: Optional[float]     # أقصى تغيّر مقبول بين عيّنتين متتاليتين
-    wrist_derived: bool                     # هل مصدره المعصم المستند على المسند؟
+    sanity_min: float                       # below this = physically impossible ⇒ discarded
+    sanity_max: float                       # above this = physically impossible ⇒ discarded
+    clinical_min: Optional[float]           # below this = abnormal but possible ⇒ WARN
+    clinical_max: Optional[float]           # above this = abnormal but possible ⇒ WARN
+    artifact_max_delta: Optional[float]     # max accepted change between consecutive samples
+    wrist_derived: bool                     # does it come from the wrist resting on the armrest?
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  حدود الحقول. تُبدَّل من هذا المكان وحده، وتُسجَّل لقطة منها في بداية كل جلسة.
+#  Field bounds. Changed here only; a snapshot is logged at the start of every session.
 #
-#  ملاحظة على artifact_max_delta: مضبوطة على معدّل العيّنة الحالي (≈30 ث).
-#  أي تغيير في معدّل العيّنة يوجب إعادة معايرتها، وإلا صارت إمّا عمياء أو حسّاسة زيادة.
+#  Note on artifact_max_delta: tuned to the current sample rate (≈30 s).
+#  Any change to the sample rate requires re-tuning it, or it becomes either
+#  blind or over-sensitive.
 # ═══════════════════════════════════════════════════════════════════════════
 FIELD_SPECS: Dict[str, FieldSpec] = {
     "heart_rate": FieldSpec(
         name="heart_rate", unit="bpm",
-        sanity_min=20.0, sanity_max=250.0,      # خارج هذا لا يمثّل قلبًا نابضًا
+        sanity_min=20.0, sanity_max=250.0,      # outside this is not a beating heart
         clinical_min=50.0, clinical_max=120.0,
         artifact_max_delta=30.0, wrist_derived=True,
     ),
     "spo2": FieldSpec(
         name="spo2", unit="%",
-        sanity_min=50.0, sanity_max=100.0,      # >100 مستحيل، <50 قراءة حسّاس لا إنسان
+        sanity_min=50.0, sanity_max=100.0,      # >100 impossible; <50 is a sensor reading, not a person
         clinical_min=94.0, clinical_max=None,
         artifact_max_delta=8.0, wrist_derived=True,
     ),
     "skin_temp": FieldSpec(
         name="skin_temp", unit="°C",
-        sanity_min=10.0, sanity_max=45.0,       # حرارة جلد المعصم، لا حرارة جسم
-        clinical_min=30.0, clinical_max=37.0,   # نطاق "متوقّع" فقط — ممنوع بناء منطق حمّى عليه
+        sanity_min=10.0, sanity_max=45.0,       # wrist skin temperature, not body temperature
+        clinical_min=30.0, clinical_max=37.0,   # an "expected" range only — no fever logic may be built on it
         artifact_max_delta=2.0, wrist_derived=True,
     ),
     "movement": FieldSpec(
         name="movement", unit="—",
-        sanity_min=0.0, sanity_max=float("inf"),  # الوحدات غير محسومة حتى يُحسم مصدر الحركة
-        clinical_min=None, clinical_max=None,     # الخمول ليس شذوذًا في القيمة، بل في الزمن ⟵ watchdog
-        artifact_max_delta=None, wrist_derived=False,  # الحركة يُفترض أنها تقفز — لا فحص artifact
+        sanity_min=0.0, sanity_max=float("inf"),  # units depend on the movement source
+        clinical_min=None, clinical_max=None,     # immobility is a time anomaly, not a value anomaly ⟵ watchdog
+        artifact_max_delta=None, wrist_derived=False,  # movement is expected to jump — no artifact check
     ),
 }
 
 
-# الحقول المأخوذة من المعصم — تُشتقّ من FIELD_SPECS ولا تُكرَّر يدويًا،
-# وإلا انفصلت القائمتان عند إضافة حقل جديد.
+# Wrist-derived fields — derived from FIELD_SPECS rather than duplicated by hand,
+# otherwise the two lists drift apart when a field is added.
 _WRIST_FIELD_NAMES = tuple(n for n, s in FIELD_SPECS.items() if s.wrist_derived)
 
 
 @dataclass
 class FieldResult:
-    """نتيجة حقل واحد. value = None يعني: **لا تعرض رقمًا إطلاقًا**."""
+    """Result for one field. value = None means: **display no number at all**."""
 
     name: str
     value: Optional[float]
@@ -154,10 +165,10 @@ class FieldResult:
 @dataclass
 class ValidationResult:
     """
-    مخرج المدقّق لعيّنة واحدة — وهو **المصدر الوحيد** الذي تقرأ منه الشاشة.
+    Validator output for one sample — the **only source** the screen reads from.
 
-    flags  = جودة البيانات (لماذا رُفضت/عُلّمت قراءة).
-    alerts = إجراء مطلوب من المستخدم، مستقل تمامًا عن جودة القراءات.
+    flags  = data quality (why a reading was rejected/flagged).
+    alerts = action required from the user, fully independent of reading quality.
     """
 
     t: float
@@ -166,9 +177,9 @@ class ValidationResult:
     fields: Dict[str, FieldResult]
     flags: List[str] = field(default_factory=list)
     alerts: List[str] = field(default_factory=list)
-    immobility_s: float = 0.0     # منذ آخر تحويل وزن مؤكَّد
-    wrist_rest_s: float = 0.0     # استناد متصل للمعصم على المسند
-    silence_s: float = 0.0        # منذ آخر قراءة معصم صالحة للعرض
+    immobility_s: float = 0.0     # since the last confirmed weight shift
+    wrist_rest_s: float = 0.0     # continuous wrist rest on the armrest
+    silence_s: float = 0.0        # since the last displayable wrist reading
 
     def status_of(self, name: str) -> Status:
         return self.fields[name].status
@@ -182,9 +193,10 @@ class ValidationResult:
 
 class Validator:
     """
-    مدقّق ذو ذاكرة عبر العيّنات. نسخة واحدة لكل مستخدم/جلسة.
+    Validator with memory across samples. One instance per user/session.
 
-    مبدأ ثابت: عند الشك تُرفض القراءة. "لا قراءة" أصدق من قراءة مغلوطة.
+    Fixed principle: when in doubt, reject the reading. "No reading" is more
+    honest than a wrong reading.
     """
 
     def __init__(
@@ -205,28 +217,31 @@ class Validator:
         self.reset()
 
     def reset(self) -> None:
-        """تصفير الذاكرة — تُستدعى عند بدء جلسة جديدة."""
-        self._last_accepted: Dict[str, float] = {}   # أساس فحص artifact
-        self._last_seen: Dict[str, float] = {}       # آخر قيمة اجتازت sanity (لفحص stuck)
+        """Clear memory — called at the start of a new session."""
+        self._last_accepted: Dict[str, float] = {}   # artifact-check baseline
+        self._last_seen: Dict[str, float] = {}       # last value that passed sanity (stuck check)
         self._repeat: Dict[str, int] = {}
         self._artifact_streak: Dict[str, int] = {}
         self._last_t: Optional[float] = None
-        # كل المؤقّتات **مُراكِمة**، لا مشتقّة من طوابع زمنية محفوظة. السبب في validate().
+        # All timers are **accumulators**, not derived from stored timestamps. See validate().
         self._immobility_s: float = 0.0
         self._wrist_rest_s: float = 0.0
         self._silence_s: float = 0.0
 
-    # ── واجهة الاستعمال الوحيدة ──
+    # ── The single public entry point ──
     def validate(self, sample: VitalSample) -> ValidationResult:
         sample_flags: List[str] = []
 
-        # ساعة الحسّاس هي المرجع، لا ساعة النظام — حتى تعمل المحاكاة المعجَّلة بنفس المنطق.
+        # The sensor clock is the reference, not the system clock — so accelerated
+        # simulation runs on exactly the same logic.
         #
-        # الخمول يُراكَم بفروق زمنية موجبة فقط، ولا يُشتقّ من "آخر لحظة حركة" محفوظة.
-        # الفرق ليس أسلوبيًا: ساعة راجعة للخلف (إعادة تشغيل المتحكّم مثلًا) كانت
-        # ستُصفّر الطابع المحفوظ ⇒ تضيع المدّة المتراكمة ويُكتم إنذار قائم، فيقضي
-        # المستخدم ضعف المدّة بلا تحويل وزن. المُراكِم يحتفظ بها: العيّنة المشبوهة
-        # وحدها تُهمل (dt=0) ولا يُفقد ما قبلها.
+        # Immobility is accumulated from positive time deltas only, never derived
+        # from a stored "last movement" timestamp. The difference is not stylistic:
+        # a clock that jumps backwards (e.g. an MCU reboot) would reset the stored
+        # timestamp ⇒ the accumulated time is lost and an active alert is silenced,
+        # and the user goes twice as long without a weight shift. The accumulator
+        # keeps it: only the suspicious sample is ignored (dt=0); nothing before it
+        # is lost.
         dt = 0.0
         if self._last_t is not None:
             if sample.t < self._last_t:
@@ -235,24 +250,26 @@ class Validator:
                 dt = sample.t - self._last_t
         self._last_t = sample.t
 
-        # ── 1) بوابة التلامس ──
-        # حسّاس بلا معصم يطلّع ضوضاء قد تشبه قراءة حقيقية، لذا البوابة تسبق كل فحص آخر.
-        # رفع المعصم وإرجاعه حدث متكرر جدًا، لا حالة استثنائية.
+        # ── 1) Contact gate ──
+        # A sensor with no wrist on it outputs noise that can look like a real
+        # reading, so the gate runs before every other check. Lifting and
+        # replacing the wrist is a very frequent event, not an exception.
         contact = self._has_contact(sample.ir_dc)
         if not contact:
             sample_flags.append(FLAG_NO_CONTACT)
-            # تمييز مقصود في السجلّ: "المعصم مرفوع" حدث طبيعي متكرر،
-            # أما "ir_dc خارج مدى الحسّاس" فعطب عتاد يستدعي صيانة لا تنبيه مستخدم.
+            # Deliberate distinction in the log: "wrist lifted" is a normal,
+            # frequent event; "ir_dc outside sensor range" is a hardware fault
+            # that needs maintenance, not a user prompt.
             if _is_number(sample.ir_dc) and not _ir_in_range(float(sample.ir_dc)):
                 sample_flags.append(FLAG_IR_IMPLAUSIBLE)
 
-        # ── 2) الفحوصات الحيوية ──
+        # ── 2) Vital-sign checks ──
         results: Dict[str, FieldResult] = {}
         for name, spec in FIELD_SPECS.items():
             raw = getattr(sample, name)
             results[name] = self._check_field(spec, raw, contact)
 
-        # ── 3) watchdog الخمول — مستقل عن المعصم ──
+        # ── 3) Immobility watchdog — independent of the wrist ──
         mov = results["movement"]
         movement_confirmed = (
             mov.status in (Status.VALID, Status.WARN)
@@ -260,11 +277,13 @@ class Validator:
             and mov.value >= self.movement_threshold
         )
         if mov.status not in (Status.VALID, Status.WARN) or mov.value is None:
-            # لا نستطيع تأكيد الحركة ⇒ المؤقّت يستمر (fail-loud).
-            # تنبيه المستخدم للحركة بلا داعٍ غير ضار، أما كتم الإنذار فخطر تقرّحات.
+            # Movement cannot be confirmed ⇒ the timer keeps running (fail-loud).
+            # Prompting the user to move unnecessarily is harmless; silencing the
+            # alert risks pressure injuries.
             sample_flags.append(FLAG_MOVEMENT_UNVERIFIED)
 
-        # حركة مؤكَّدة وحدها تصفّر المُراكِم. أي شيء آخر — بما فيه خلل الساعة — يُبقيه.
+        # Only confirmed movement resets the accumulator. Anything else —
+        # including a clock fault — leaves it running.
         if movement_confirmed:
             self._immobility_s = 0.0
         else:
@@ -274,9 +293,10 @@ class Validator:
         if self._immobility_s >= self.immobility_limit_s:
             alerts.append(ALERT_NEEDS_MOVEMENT)
 
-        # ── 4) watchdog ضغط المعصم — مستقل عن حركة الجسم ──
-        # جلد المعصم رقيق فوق عظم مباشرة، وقد يكون الإحساس ضعيفًا فلا ينبّه الألم.
-        # رفع المعصم وحده يصفّر العدّاد؛ تحريك الجسم لا يرفع الضغط عن المعصم.
+        # ── 4) Wrist-pressure watchdog — independent of body movement ──
+        # Wrist skin is thin over bone, and sensation may be impaired so pain
+        # does not warn the user. Only lifting the wrist resets the counter;
+        # moving the body does not relieve pressure on the wrist.
         if contact:
             self._wrist_rest_s += dt
         else:
@@ -284,13 +304,14 @@ class Validator:
         if self._wrist_rest_s >= self.wrist_rest_limit_s:
             alerts.append(ALERT_LIFT_WRIST)
 
-        # ── 5) عطب الحسّاس ── قيمة خارج مدى العتاد ⇒ صيانة، لا إجراء من المستخدم.
+        # ── 5) Sensor fault ── value outside hardware range ⇒ maintenance, not a user action.
         if FLAG_IR_IMPLAUSIBLE in sample_flags:
             alerts.append(ALERT_SENSOR_FAULT)
 
-        # ── 6) صمت القياس ──
-        # المراقبة متوقّفة فعليًا حين لا يصل أي رقم صالح للعرض، مهما كان السبب.
-        # شاشة صامتة تُقرأ كـ"كل شيء على ما يرام"، وهي أخطر من شاشة تصرخ.
+        # ── 6) Measurement silence ──
+        # Monitoring has effectively stopped when no displayable number arrives,
+        # whatever the reason. A silent screen reads as "all is well", which is
+        # more dangerous than a screen that shouts.
         if any(results[name].value is not None for name in _WRIST_FIELD_NAMES):
             self._silence_s = 0.0
         else:
@@ -310,13 +331,14 @@ class Validator:
             silence_s=self._silence_s,
         )
 
-    # ── داخلي ──
+    # ── Internal ──
     def _has_contact(self, ir_dc: Optional[float]) -> bool:
         """
-        ir_dc مفقود أو NaN أو خارج مدى الحسّاس ⇒ نفترض عدم التلامس (الافتراض الآمن).
+        ir_dc missing, NaN or outside the sensor range ⇒ assume no contact (the safe default).
 
-        البوابة تُغلق عند الشك: بوابة مفتوحة بقيمة تالفة تمرّر ضوضاء إلى عين المستخدم،
-        وبوابة مغلقة بالخطأ تُظهر "ضع معصمك على المسند" — والثانية غلط غير مؤذٍ.
+        The gate closes on doubt: a gate opened by a corrupt value passes noise to
+        the user's eyes; a gate closed by mistake shows "Rest your wrist on the
+        armrest" — the second error is harmless.
         """
         if not _is_number(ir_dc):
             return False
@@ -328,12 +350,12 @@ class Validator:
     def _check_field(
         self, spec: FieldSpec, raw: object, contact: bool
     ) -> FieldResult:
-        # (1) بوابة التلامس تسبق كل شيء: لا معصم ⇒ لا رقم، مهما بدت الأرقام منطقية.
+        # (1) The contact gate precedes everything: no wrist ⇒ no number, however plausible.
         if spec.wrist_derived and not contact:
-            self._forget(spec.name)  # لئلا تُقارَن قراءة ما بعد العودة بأساس قديم
+            self._forget(spec.name)  # so a post-return reading is not compared to a stale baseline
             return FieldResult(spec.name, None, Status.NO_CONTACT, [FLAG_NO_CONTACT])
 
-        # (2) SANITY: غياب/نوع/NaN/استحالة فيزيائية ⇒ ترمى القيمة.
+        # (2) SANITY: missing / wrong type / NaN / physically impossible ⇒ value discarded.
         if raw is None:
             return FieldResult(spec.name, None, Status.INVALID, [FLAG_SANITY_MISSING])
         if not _is_number(raw):
@@ -346,7 +368,7 @@ class Validator:
 
         flags: List[str] = []
 
-        # (3) فحص التجمّد: قيمة متطابقة بتّيًا مرارًا = حسّاس معلّق، لا حالة مستقرة.
+        # (3) Stuck check: a bit-identical value repeated = a hung sensor, not a stable state.
         last_seen = self._last_seen.get(spec.name)
         if last_seen is not None and v == last_seen:
             self._repeat[spec.name] = self._repeat.get(spec.name, 1) + 1
@@ -355,7 +377,7 @@ class Validator:
         self._last_seen[spec.name] = v
         stuck = self._repeat[spec.name] >= self.stuck_repeat_limit
 
-        # (4) فحص القفزة: تغيّر أكبر من الممكن فسيولوجيًا بين عيّنتين = رعشة/حركة.
+        # (4) Jump check: a change larger than physiologically possible between two samples = tremor/movement.
         artifact = False
         baseline = self._last_accepted.get(spec.name)
         if spec.artifact_max_delta is not None and baseline is not None:
@@ -364,8 +386,8 @@ class Validator:
                 streak = self._artifact_streak.get(spec.name, 0) + 1
                 self._artifact_streak[spec.name] = streak
                 if streak >= ARTIFACT_RESYNC_N:
-                    # قفزات متتالية = تغيّر حقيقي مستمر ⟵ نتبنّى الأساس الجديد.
-                    # العيّنة الحالية تبقى مرفوضة، والتالية تُقبل.
+                    # Consecutive jumps = a sustained real change ⟵ adopt the new baseline.
+                    # The current sample stays rejected; the next one is accepted.
                     self._last_accepted[spec.name] = v
                     self._artifact_streak[spec.name] = 0
                     flags.append(FLAG_ARTIFACT_RESYNC)
@@ -380,10 +402,10 @@ class Validator:
         if artifact:
             flags.append(FLAG_ARTIFACT)
         if stuck or artifact:
-            # القيمة ليست قياسًا حقيقيًا ⇒ لا تصل عين المستخدم.
+            # Not a real measurement ⇒ it never reaches the user's eyes.
             return FieldResult(spec.name, None, Status.INVALID, flags)
 
-        # (5) CLINICAL: ممكنة لكن شاذّة ⇒ تُحفظ القيمة مع تعليم.
+        # (5) CLINICAL: possible but abnormal ⇒ value kept and flagged.
         if spec.clinical_min is not None and v < spec.clinical_min:
             flags.append(FLAG_CLINICAL_LOW)
         if spec.clinical_max is not None and v > spec.clinical_max:
@@ -393,7 +415,7 @@ class Validator:
         return FieldResult(spec.name, v, status, flags)
 
     def _forget(self, name: str) -> None:
-        """نسيان ذاكرة حقل — بعد فقد التلامس لا معنى لمقارنة القراءة الجديدة بالقديمة."""
+        """Forget a field's memory — after contact loss, comparing the new reading to the old one is meaningless."""
         self._last_accepted.pop(name, None)
         self._last_seen.pop(name, None)
         self._repeat.pop(name, None)
@@ -401,12 +423,12 @@ class Validator:
 
 
 def _ir_in_range(v: float) -> bool:
-    """قيمة ir_dc محتملة من الحسّاس فعلًا (لا NaN ولا inf ولا خارج مدى الـ ADC)."""
+    """An ir_dc value the sensor could actually produce (not NaN, not inf, within ADC range)."""
     if math.isnan(v) or math.isinf(v):
         return False
     return 0.0 <= v <= CONTACT_IR_SANITY_MAX
 
 
 def _is_number(v: object) -> bool:
-    """bool هو int في بايثون — نستبعده صراحةً لئلا يمرّ True كقراءة."""
+    """bool is an int in Python — excluded explicitly so True never passes as a reading."""
     return isinstance(v, (int, float)) and not isinstance(v, bool)

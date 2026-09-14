@@ -5,8 +5,8 @@ __pycache__/
 venv/
 .claude/
 
-# ملفات ناتجة عن التشغيل — بيانات جلسات، لا مصدر.
-# سجلّ جلسة تجريبية لا يُسلَّم كأنه سجلّ قياس حقيقي.
+# Files produced by running — session data, not source.
+# A test-session log must never be delivered as if it were a real measurement log.
 audit_log.jsonl
 measurements.csv
 measurements.csv.meta.json

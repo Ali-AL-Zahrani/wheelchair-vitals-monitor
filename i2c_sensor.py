@@ -1,29 +1,32 @@
 """
-طبقة العتاد — MAX30102 + MAX30205 + MPU-6050 على ناقل I2C.
+Hardware layer — MAX30102 + MAX30205 + MPU-6050 over the I2C bus.
 
-⚠️ **لم تُختبر على عتاد فعلي.** اختباراتها الآلية تُثبت فكّ السجلات وحساب الإشارة
-بناقل وهمي، لا صحّة التوصيل ولا معايرة القيم. تُجرَّب على الجهاز قبل أي استخدام.
+⚠️ **Not yet tested on physical hardware.** Its automated tests prove register
+decoding and signal maths against a fake bus — not wiring correctness or value
+calibration. Try it on the device before any use.
 
-هذا الملف هو **الوحيد** الذي يُبدَّل عند الانتقال من المحاكاة إلى العتاد:
-يرث `SensorInterface` ويطبّق `read()`، فلا يُلمس المدقّق ولا الشاشة ولا السجلّ.
+This is the **only** file that changes when moving from simulation to hardware:
+it inherits `SensorInterface` and implements `read()`, so the validator, the
+screen and the log are untouched.
 
 ────────────────────────────────────────────────────────────────────────────
-حقيقة يجب أن تُفهم قبل قراءة الكود:
-  **MAX30102 لا يُخرج "نبضة/دقيقة".** يُخرج عيّنات ضوء خام (أحمر + تحت أحمر)
-  بتردد 100 هرتز عبر ذاكرة FIFO عمقها 32 عيّنة فقط. النبض والأكسجين
-  **يُحسبان هنا** من نافذة زمنية من تلك العيّنات:
-    - `ir_dc`      = المستوى المستمر لقناة IR ⟵ دليل وجود المعصم
-    - `heart_rate` = كشف قمم النبض في المركّبة المتغيّرة
-    - `spo2`       = نسبة النسب (ratio-of-ratios) بين القناتين
-  وعمق الـFIFO 32 عيّنة يعني امتلاءه خلال ~0.3 ثانية عند 100 هرتز، فلا بدّ
-  من تفريغه في **خيط مستقل** وإلا ضاعت عيّنات بصمت.
+A fact to understand before reading the code:
+  **The MAX30102 does not output "beats per minute".** It outputs raw light
+  samples (red + infrared) at 100 Hz through a FIFO only 32 samples deep.
+  Heart rate and oxygen are **computed here** from a time window of those samples:
+    - `ir_dc`      = the DC level of the IR channel ⟵ evidence a wrist is present
+    - `heart_rate` = peak detection on the AC component
+    - `spo2`       = ratio-of-ratios between the two channels
+  A 32-sample FIFO fills in ~0.3 s at 100 Hz, so it must be drained in a
+  **separate thread** or samples are silently lost.
 ────────────────────────────────────────────────────────────────────────────
 
-قاعدة الطبقة: **تُعيد ما قاسته، ولا تصحّح ولا تُخفي.** تعذّر الحساب ⇒ `None`،
-والمدقّق هو من يقرّر ما يُعرض. القيمة المشبوهة تُمرَّر كما هي ليرفضها المدقّق،
-لا تُقصّ هنا — التدقيق مسؤولية طبقة واحدة، لا اثنتين.
+Layer rule: **return what was measured; never correct or hide.** A failed
+computation ⇒ `None`, and the validator decides what is displayed. A suspicious
+value is passed through as-is for the validator to reject — it is not clipped
+here. Validation belongs to one layer, not two.
 
-التشغيل يتطلّب: pip install smbus2
+Running requires: pip install smbus2
 """
 
 from __future__ import annotations
@@ -35,13 +38,13 @@ from typing import List, Optional, Sequence, Tuple
 from interface import SensorInterface, VitalSample
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  عناوين الأجهزة على الناقل
+#  Device addresses on the bus
 # ═══════════════════════════════════════════════════════════════════════════
 ADDR_MAX30102 = 0x57
-ADDR_MAX30205 = 0x48      # يتغيّر بأرجل A0–A2؛ تحقّق بـ i2cdetect
-ADDR_MPU6050 = 0x68       # 0x69 إذا رُفعت رجل AD0
+ADDR_MAX30205 = 0x48      # depends on pins A0–A2; verify with i2cdetect
+ADDR_MPU6050 = 0x68       # 0x69 if the AD0 pin is pulled high
 
-# ── سجلات MAX30102 ──
+# ── MAX30102 registers ──
 _M102_INT_STATUS_1 = 0x00
 _M102_FIFO_WR_PTR = 0x04
 _M102_OVF_COUNTER = 0x05
@@ -50,38 +53,38 @@ _M102_FIFO_DATA = 0x07
 _M102_FIFO_CONFIG = 0x08
 _M102_MODE_CONFIG = 0x09
 _M102_SPO2_CONFIG = 0x0A
-_M102_LED1_PA = 0x0C      # الأحمر
-_M102_LED2_PA = 0x0D      # تحت الأحمر
+_M102_LED1_PA = 0x0C      # red
+_M102_LED2_PA = 0x0D      # infrared
 _M102_PART_ID = 0xFF
 _M102_EXPECTED_PART_ID = 0x15
 
-# ── سجلات MAX30205 ──
+# ── MAX30205 registers ──
 _M205_TEMPERATURE = 0x00
-_M205_LSB_C = 1.0 / 256.0     # 0.00390625 °م لكل خطوة
+_M205_LSB_C = 1.0 / 256.0     # 0.00390625 °C per step
 
-# ── سجلات MPU-6050 ──
+# ── MPU-6050 registers ──
 _MPU_PWR_MGMT_1 = 0x6B
 _MPU_ACCEL_XOUT_H = 0x3B
-_MPU_LSB_PER_G = 16384.0      # المدى الافتراضي ±2g
+_MPU_LSB_PER_G = 16384.0      # default ±2g range
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  إعدادات القياس
+#  Measurement settings
 # ═══════════════════════════════════════════════════════════════════════════
 
-PPG_SAMPLE_RATE_HZ = 100.0    # يجب أن يطابق إعداد _M102_SPO2_CONFIG أدناه
-PPG_WINDOW_S = 8.0            # نافذة الحساب: ~8–10 نبضات، تكفي لقمم مستقرة
+PPG_SAMPLE_RATE_HZ = 100.0    # must match the _M102_SPO2_CONFIG setting below
+PPG_WINDOW_S = 8.0            # computation window: ~8–10 beats, enough for stable peaks
 
-# شدّة تيار الـLED. الرفع الزائد يُشبع المستشعر ويُسطّح الإشارة.
-LED_RED_CURRENT = 0x24        # ≈7.2 مللي أمبير
+# LED drive current. Too much current saturates the photodetector and flattens the signal.
+LED_RED_CURRENT = 0x24        # ≈7.2 mA
 LED_IR_CURRENT = 0x24
 
-# معادلة الأكسجين: SpO2 ≈ A − B·R (نسبة النسب).
+# Oxygen equation: SpO2 ≈ A − B·R (ratio-of-ratios).
 SPO2_A = 110.0
 SPO2_B = 25.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  حسابات الإشارة — دوال خالصة، تُختبر بلا عتاد
+#  Signal maths — pure functions, testable without hardware
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _mean(xs: Sequence[float]) -> float:
@@ -89,7 +92,7 @@ def _mean(xs: Sequence[float]) -> float:
 
 
 def _moving_average(xs: Sequence[float], window: int) -> List[float]:
-    """متوسط متحرّك متمركز — يُستخرج به خطّ الأساس لفصل المركّبة المتغيّرة."""
+    """Centred moving average — extracts the baseline so the AC component can be isolated."""
     if window < 2 or len(xs) < window:
         avg = _mean(xs)
         return [avg] * len(xs)
@@ -104,30 +107,31 @@ def _moving_average(xs: Sequence[float], window: int) -> List[float]:
 
 def estimate_heart_rate(ir: Sequence[float], fs: float = PPG_SAMPLE_RATE_HZ) -> Optional[float]:
     """
-    نبضة/دقيقة من قمم موجة الـPPG، أو None إذا تعذّر الحساب.
+    Beats per minute from the peaks of the PPG waveform, or None if it cannot be computed.
 
-    None هنا **ليست فشلًا صامتًا**: المدقّق يترجمها إلى INVALID فلا يُعرض رقم.
-    وهذا أصحّ من إرجاع تخمين ضعيف — إشارة المعصم أضعف، ونافذة بلا قمم واضحة
-    تعني غالبًا حركة أو تلامسًا رديئًا، لا قلبًا متوقفًا.
+    None here is **not a silent failure**: the validator turns it into INVALID so no
+    number is displayed. That is more honest than returning a weak guess — the
+    wrist signal is weak, and a window with no clear peaks usually means movement
+    or poor contact, not a stopped heart.
     """
-    if fs <= 0 or len(ir) < int(fs * 4):      # أقلّ من 4 ثوانٍ لا تكفي
+    if fs <= 0 or len(ir) < int(fs * 4):      # fewer than 4 seconds is not enough
         return None
 
-    # فصل المركّبة المتغيّرة: نافذة 0.75 ث أطول من نبضة واحدة، فتزيل خطّ الأساس
-    # (تنفّس، انزياح الحسّاس) وتُبقي النبض.
+    # Isolate the AC component: a 0.75 s window is longer than one beat, so it
+    # removes the baseline (breathing, sensor drift) and keeps the pulse.
     baseline = _moving_average(ir, max(3, int(fs * 0.75)))
     ac = [x - b for x, b in zip(ir, baseline)]
 
     positives = sorted(v for v in ac if v > 0)
     if len(positives) < 4:
         return None
-    # عتبة القمّة عند المئين 70 للقيم الموجبة: أمتن من نصف الحدّ الأقصى،
-    # فلا تختطفها قفزة حركة واحدة.
+    # Peak threshold at the 70th percentile of positive values: more robust than
+    # half the maximum, so a single motion spike cannot hijack it.
     threshold = positives[int(len(positives) * 0.70)]
     if threshold <= 0:
         return None
 
-    refractory = max(1, int(fs * 0.30))       # سقف 200 نبضة/دقيقة
+    refractory = max(1, int(fs * 0.30))       # 200 bpm ceiling
     peaks: List[int] = []
     i = 1
     while i < len(ac) - 1:
@@ -141,7 +145,7 @@ def estimate_heart_rate(ir: Sequence[float], fs: float = PPG_SAMPLE_RATE_HZ) -> 
         return None
 
     intervals = sorted((peaks[k + 1] - peaks[k]) / fs for k in range(len(peaks) - 1))
-    median = intervals[len(intervals) // 2]   # الوسيط: نبضة ضائعة لا تُفسد الناتج
+    median = intervals[len(intervals) // 2]   # the median: one missed beat does not corrupt the result
     if median <= 0:
         return None
     return 60.0 / median
@@ -149,10 +153,10 @@ def estimate_heart_rate(ir: Sequence[float], fs: float = PPG_SAMPLE_RATE_HZ) -> 
 
 def estimate_spo2(red: Sequence[float], ir: Sequence[float]) -> Optional[float]:
     """
-    تشبّع الأكسجين التقريبي من نسبة النسب، أو None إذا تعذّر.
+    Approximate oxygen saturation from the ratio-of-ratios, or None if it cannot be computed.
 
-    ⚠️ الناتج **غير معاير** (انظر SPO2_A / SPO2_B). ولا يُقصّ هنا إلى مدى منطقي:
-    القيمة المستحيلة تُمرَّر كما هي ليرفضها المدقّق. التدقيق في طبقة واحدة لا اثنتين.
+    The result is not clipped to a plausible range here: an impossible value is
+    passed through as-is for the validator to reject. Validation lives in one layer, not two.
     """
     if len(red) != len(ir) or len(red) < 8:
         return None
@@ -173,10 +177,10 @@ def estimate_spo2(red: Sequence[float], ir: Sequence[float]) -> Optional[float]:
 
 def movement_index(accel_g: Sequence[Tuple[float, float, float]]) -> Optional[float]:
     """
-    مؤشّر حركة عام: متوسط انحراف مقدار التسارع عن متوسطه، بوحدة g.
+    General movement index: mean deviation of acceleration magnitude from its mean, in g.
 
-    ⚠️ يقيس **حركة عامة لا تحويل وزن**. وطرح المتوسط
-    يلغي الجاذبية تلقائيًا، فلا يحتاج معايرة اتجاه الكرسي.
+    Measures **general movement, not weight shift**. Subtracting the mean cancels
+    gravity automatically, so no chair-orientation calibration is needed.
     """
     if len(accel_g) < 2:
         return None
@@ -191,15 +195,16 @@ def _twos_complement_16(high: int, low: int) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  الحسّاس
+#  The sensor
 # ═══════════════════════════════════════════════════════════════════════════
 
 class I2CSensor(SensorInterface):
     """
-    مصدر بيانات فعلي بنفس عقد `MockSensor` — يُبدَّل مكانه بلا تغيير آخر.
+    A physical data source with the same contract as `MockSensor` — a drop-in replacement.
 
-    `bus` أي كائن يوفّر واجهة smbus2 (`read_byte_data` / `write_byte_data` /
-    `read_i2c_block_data`). حقنه من الخارج يجعل الطبقة قابلة للاختبار بناقل وهمي.
+    `bus` is any object exposing the smbus2 interface (`read_byte_data` /
+    `write_byte_data` / `read_i2c_block_data`). Injecting it from outside makes
+    the layer testable with a fake bus.
     """
 
     def __init__(
@@ -228,37 +233,37 @@ class I2CSensor(SensorInterface):
         self._stop = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._t0: Optional[float] = None
-        self.lost_samples = 0      # عدّاد فيض الـFIFO — عيّنات ضاعت فعلًا
+        self.lost_samples = 0      # FIFO overflow counter — samples that were genuinely lost
 
-    # ── دورة الحياة ──
+    # ── Lifecycle ──
     def start(self) -> None:
         """
-        تهيئة الأجهزة الثلاثة وبدء تفريغ الـFIFO.
+        Initialise the three devices and start draining the FIFO.
 
-        يتحقّق من هوية MAX30102 أولًا: توصيل خاطئ يجب أن **يفشل بصوت عالٍ** هنا،
-        لا أن ينتج أرقامًا عشوائية تبدو قراءات.
+        Checks the MAX30102 part ID first: bad wiring must **fail loudly** here,
+        not produce random numbers that look like readings.
         """
         part_id = self._bus.read_byte_data(self._addr_ppg, _M102_PART_ID)
         if part_id != _M102_EXPECTED_PART_ID:
             raise RuntimeError(
-                f"MAX30102 غير موجود على العنوان {self._addr_ppg:#04x} "
-                f"(هوية القطعة {part_id:#04x} بدل {_M102_EXPECTED_PART_ID:#04x}). "
-                "تحقّق من التوصيل بـ i2cdetect."
+                f"MAX30102 not found at address {self._addr_ppg:#04x} "
+                f"(part ID {part_id:#04x} instead of {_M102_EXPECTED_PART_ID:#04x}). "
+                "Check the wiring with i2cdetect."
             )
 
-        self._bus.write_byte_data(self._addr_ppg, _M102_MODE_CONFIG, 0x40)   # إعادة ضبط
+        self._bus.write_byte_data(self._addr_ppg, _M102_MODE_CONFIG, 0x40)   # reset
         time.sleep(0.05)
         self._bus.write_byte_data(self._addr_ppg, _M102_FIFO_WR_PTR, 0x00)
         self._bus.write_byte_data(self._addr_ppg, _M102_OVF_COUNTER, 0x00)
         self._bus.write_byte_data(self._addr_ppg, _M102_FIFO_RD_PTR, 0x00)
-        self._bus.write_byte_data(self._addr_ppg, _M102_FIFO_CONFIG, 0x4F)   # متوسط 4 عيّنات
-        self._bus.write_byte_data(self._addr_ppg, _M102_MODE_CONFIG, 0x03)   # وضع SpO2
-        # مدى ADC 4096nA + 100 عيّنة/ث + عرض نبضة 411µs (دقّة 18-بت)
+        self._bus.write_byte_data(self._addr_ppg, _M102_FIFO_CONFIG, 0x4F)   # 4-sample averaging
+        self._bus.write_byte_data(self._addr_ppg, _M102_MODE_CONFIG, 0x03)   # SpO2 mode
+        # ADC range 4096 nA + 100 samples/s + 411 µs pulse width (18-bit resolution)
         self._bus.write_byte_data(self._addr_ppg, _M102_SPO2_CONFIG, 0x27)
         self._bus.write_byte_data(self._addr_ppg, _M102_LED1_PA, LED_RED_CURRENT)
         self._bus.write_byte_data(self._addr_ppg, _M102_LED2_PA, LED_IR_CURRENT)
 
-        self._bus.write_byte_data(self._addr_imu, _MPU_PWR_MGMT_1, 0x00)     # إيقاظ
+        self._bus.write_byte_data(self._addr_imu, _MPU_PWR_MGMT_1, 0x00)     # wake up
 
         self._t0 = time.monotonic()
         self._stop.clear()
@@ -271,17 +276,17 @@ class I2CSensor(SensorInterface):
             self._worker.join(timeout=2.0)
             self._worker = None
         try:
-            self._bus.write_byte_data(self._addr_ppg, _M102_MODE_CONFIG, 0x80)  # إسبات
+            self._bus.write_byte_data(self._addr_ppg, _M102_MODE_CONFIG, 0x80)  # shutdown
         except Exception:
-            pass   # الإغلاق لا يُفشل الجلسة
+            pass   # shutdown must never fail the session
 
-    # ── القراءة ──
+    # ── Reading ──
     def read(self) -> VitalSample:
         """
-        عيّنة واحدة محسوبة من نافذة الـPPG الحالية.
+        One sample computed from the current PPG window.
 
-        الزمن من ساعة أحادية الاتجاه (monotonic) لا من ساعة النظام: تعديل وقت
-        الجهاز أو الانتقال الصيفي يجب ألّا يُربك مؤقّتات المدقّق.
+        Time comes from a monotonic clock, not the system clock: changing the
+        device time or a DST shift must not confuse the validator's timers.
         """
         with self._lock:
             red = list(self._red)
@@ -292,26 +297,27 @@ class I2CSensor(SensorInterface):
 
         return VitalSample(
             t=t,
-            ir_dc=_mean(ir) if ir else None,          # الدليل الوحيد على وجود المعصم
+            ir_dc=_mean(ir) if ir else None,          # the only evidence a wrist is present
             heart_rate=estimate_heart_rate(ir, self._fs),
             spo2=estimate_spo2(red, ir),
             skin_temp=self._read_skin_temp(),
             movement=movement_index(accel),
         )
 
-    # ── داخلي ──
+    # ── Internal ──
     def _drain_loop(self) -> None:
         """
-        تفريغ مستمر للـFIFO. عمق الـFIFO 32 عيّنة فقط ⟵ يمتلئ خلال ~0.3 ث
-        عند 100 هرتز، والتأخر عنه يفقد عيّنات بلا إشعار.
+        Continuous FIFO drain. The FIFO holds only 32 samples ⟵ it fills in ~0.3 s
+        at 100 Hz, and falling behind loses samples with no notice.
         """
         while not self._stop.is_set():
             try:
                 self._drain_once()
                 self._sample_accel()
             except OSError:
-                # خلل ناقل عابر: لا نُسقط الجلسة. غياب العيّنات سيظهر للمدقّق
-                # كقراءة متعذّرة، وهو المسار الصحيح للتعامل معه.
+                # Transient bus error: do not bring the session down. Missing
+                # samples will surface at the validator as an unavailable
+                # reading — the correct path for handling it.
                 pass
             self._stop.wait(self._drain_interval)
 
@@ -320,7 +326,7 @@ class I2CSensor(SensorInterface):
         rd = self._bus.read_byte_data(self._addr_ppg, _M102_FIFO_RD_PTR)
         overflow = self._bus.read_byte_data(self._addr_ppg, _M102_OVF_COUNTER)
         if overflow:
-            self.lost_samples += overflow      # يُعدّ ولا يُبتلع
+            self.lost_samples += overflow      # counted, never swallowed
 
         pending = (wr - rd) % 32
         if pending == 0:
@@ -329,7 +335,7 @@ class I2CSensor(SensorInterface):
         samples: List[Tuple[float, float]] = []
         remaining = pending
         while remaining > 0:
-            chunk = min(remaining, 5)          # 5 عيّنات × 6 بايت = 30 ≤ حدّ الكتلة 32
+            chunk = min(remaining, 5)          # 5 samples × 6 bytes = 30 ≤ the 32-byte block limit
             raw = self._bus.read_i2c_block_data(self._addr_ppg, _M102_FIFO_DATA, chunk * 6)
             for k in range(chunk):
                 base = k * 6
@@ -355,7 +361,7 @@ class I2CSensor(SensorInterface):
             del self._accel[:-self._capacity]
 
     def _read_skin_temp(self) -> Optional[float]:
-        """حرارة **جلد المعصم** — ليست حرارة الجسم."""
+        """**Wrist skin** temperature — not body temperature."""
         try:
             raw = self._bus.read_i2c_block_data(self._addr_temp, _M205_TEMPERATURE, 2)
         except OSError:
@@ -365,15 +371,15 @@ class I2CSensor(SensorInterface):
 
 def open_default_bus(bus_number: int = 1):
     """
-    ناقل I2C الفعلي على Raspberry Pi (المنفذ 1).
+    The physical I2C bus on a Raspberry Pi (bus 1).
 
-    الاستيراد داخل الدالة عمدًا: بقية المشروع تعمل بمكتبة قياسية فقط،
-    و`smbus2` تلزم عند التشغيل على العتاد وحده.
+    The import is inside the function on purpose: the rest of the project runs on
+    the standard library alone, and `smbus2` is needed only when running on hardware.
     """
     try:
         from smbus2 import SMBus
     except ImportError as exc:
         raise RuntimeError(
-            "طبقة العتاد تحتاج smbus2 — نصّبها بـ: pip install smbus2"
+            "The hardware layer needs smbus2 — install it with: pip install smbus2"
         ) from exc
     return SMBus(bus_number)

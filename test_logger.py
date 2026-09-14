@@ -1,8 +1,8 @@
 """
-اختبارات طبقة التدقيق.
+Tests for the audit layer.
 
-ما تحرسه هذه الاختبارات: السجلّ الطبي لا يكذب ولا يبتلع حدثًا.
-سجلّ ناقص أسوأ من غياب السجلّ — لأنه يوهم بأن ما ليس فيه لم يحدث.
+What these tests guard: the medical log never lies and never swallows an event.
+An incomplete log is worse than no log — it implies that what is missing never happened.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def buf() -> io.StringIO:
 
 
 def events(buf: io.StringIO):
-    """كل سطر يجب أن يكون JSON صالحًا بذاته — هذا جزء من العقد لا تفصيل شكلي."""
+    """Every line must be valid JSON on its own — part of the contract, not a formatting detail."""
     return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
 
 
@@ -50,25 +50,25 @@ def run(buf, samples, validator=None):
     return events(buf)
 
 
-# ── سلامة الصيغة ──
+# ── Format integrity ──
 def test_every_line_is_valid_json_and_carries_both_clocks(buf):
     evs = run(buf, [sample(t=0.0, hr=None)])
     assert len(evs) >= 2
     for ev in evs:
         assert ev["session_id"] == "test"
-        assert "t" in ev and "ts" in ev   # ساعة الحسّاس + ساعة الجدار
+        assert "t" in ev and "ts" in ev   # sensor clock + wall clock
 
 
 def test_nan_is_written_as_text_not_as_invalid_json(buf):
     """
-    NaN الخام يكسر أي قارئ JSON صارم، و null يخلط بين "لم تصل قيمة" و"وصلت تالفة".
+    Raw NaN breaks any strict JSON reader, and null conflates "no value arrived" with "a corrupt value arrived".
     """
-    raw = buf  # الاسم للتوضيح فقط
+    raw = buf  # name for clarity only
     evs = run(raw, [sample(spo2=float("nan"))])
     rejected = [e for e in evs if e["type"] == EV_REJECTED and e["field"] == "spo2"]
     assert rejected and rejected[0]["raw"] == "NaN"
     assert FLAG_SANITY_NAN in rejected[0]["flags"]
-    assert "NaN," not in buf.getvalue()  # لم تُكتب قيمة NaN عارية في أي مكان
+    assert "NaN," not in buf.getvalue()  # no bare NaN value written anywhere
 
 
 def test_session_start_records_the_thresholds_in_force(buf):
@@ -82,15 +82,15 @@ def test_session_start_records_the_thresholds_in_force(buf):
 
 def test_session_start_records_the_clinical_limits_too(buf):
     """
-    الحدود السريرية تقرّر متى يُحذَّر المستخدم — وهي غير معايرة بعد.
-    تحذير مسجَّل بلا الحدّ الذي أطلقه لا يمكن مراجعته لاحقًا.
+    The clinical bounds decide when the user is warned.
+    A logged warning without the bound that triggered it cannot be reviewed later.
     """
     evs = run(buf, [sample()])
     limits = evs[0]["field_limits"]
     assert limits["heart_rate"]["clinical_min"] == 50.0
     assert limits["spo2"]["clinical_min"] == 94.0
     assert limits["skin_temp"]["unit"] == "°C"
-    # الحدود اللانهائية تُكتب نصًّا لا كـ JSON تالف
+    # Infinite bounds are written as text, not as corrupt JSON
     assert limits["movement"]["sanity_max"] == "Infinity"
 
 
@@ -101,14 +101,14 @@ def test_session_start_records_the_new_watchdog_limits(buf):
     assert evs[0]["thresholds"]["SILENCE_LIMIT_S"] == 222.0
 
 
-# ── ما يُسجَّل وما لا يُسجَّل ──
+# ── What is logged and what is not ──
 def test_clean_sample_writes_nothing_beyond_session_start(buf):
     evs = run(buf, [sample()])
     assert [e["type"] for e in evs] == [EV_SESSION_START]
 
 
 def test_rejected_reading_records_reason_and_raw_value(buf):
-    """التدقيق يحتاج معرفة *ما الذي* رُفض، لا مجرّد أنه رُفض."""
+    """The audit needs to know *what* was rejected, not merely that it was."""
     evs = run(buf, [sample(hr=320.0)])
     rej = [e for e in evs if e["type"] == EV_REJECTED]
     assert len(rej) == 1
@@ -120,11 +120,11 @@ def test_rejected_reading_records_reason_and_raw_value(buf):
 def test_missing_value_logs_null_not_the_string_nan(buf):
     evs = run(buf, [sample(hr=None)])
     rej = [e for e in evs if e["type"] == EV_REJECTED][0]
-    assert rej["raw"] is None          # "لم تصل قيمة" — سبب مختلف عن NaN
+    assert rej["raw"] is None          # "no value arrived" — a different reason from NaN
 
 
 def test_no_contact_is_one_sample_level_event(buf):
-    """رفع المعصم حدث واحد، لا ثلاثة أخطاء منفصلة — وإلا تضخّم السجلّ بلا معنى."""
+    """Lifting the wrist is one event, not three separate errors — otherwise the log bloats without information."""
     evs = run(buf, [sample(ir=900.0)])
     nc = [e for e in evs if e["type"] == EV_NO_CONTACT]
     assert len(nc) == 1
@@ -134,8 +134,8 @@ def test_no_contact_is_one_sample_level_event(buf):
 
 def test_hardware_fault_is_distinguishable_from_a_lifted_wrist(buf):
     """
-    الحدثان يُصفّران الشاشة بنفس الشكل، لكن أحدهما سلوك استخدام عادي
-    والآخر عطب يستدعي صيانة. تساويهما في السجلّ يعني ضياع العطب.
+    Both events blank the screen the same way, but one is normal usage and the
+    other is a fault needing maintenance. If they look the same in the log, the fault is lost.
     """
     lifted = run(buf, [sample(ir=1_500.0)])
     lifted_ev = [e for e in lifted if e["type"] == EV_NO_CONTACT][0]
@@ -144,7 +144,7 @@ def test_hardware_fault_is_distinguishable_from_a_lifted_wrist(buf):
     broken = run(io.StringIO(), [sample(ir=9_999_999.0)])
     broken_ev = [e for e in broken if e["type"] == EV_NO_CONTACT][0]
     assert "IR_IMPLAUSIBLE" in broken_ev["flags"]
-    assert broken_ev["ir_dc"] == 9_999_999.0      # القيمة الخام محفوظة للتحقيق
+    assert broken_ev["ir_dc"] == 9_999_999.0      # raw value kept for investigation
 
 
 def test_warn_reading_is_logged_even_though_it_reached_the_screen(buf):
@@ -157,10 +157,10 @@ def test_warn_reading_is_logged_even_though_it_reached_the_screen(buf):
 def test_non_numeric_value_is_preserved_as_text(buf):
     evs = run(buf, [sample(hr="74")])
     rej = [e for e in evs if e["type"] == EV_REJECTED][0]
-    assert rej["raw"] == "'74'"        # يُحفظ كما وصل ليُحقَّق في الدرايفر
+    assert rej["raw"] == "'74'"        # kept as received so the driver can be investigated
 
 
-# ── الإنذارات: تحوّل لا تكرار ──
+# ── Alerts: transitions, not repetition ──
 def test_alert_logged_once_on_transition_not_every_sample(buf):
     v = Validator(immobility_limit_s=60.0)
     samples = [sample(t=i * 30.0, hr=74.0 + i * 0.1, mov=0.01) for i in range(6)]
@@ -174,15 +174,15 @@ def test_alert_logged_once_on_transition_not_every_sample(buf):
 def test_alert_cleared_records_duration(buf):
     v = Validator(immobility_limit_s=60.0)
     samples = [sample(t=i * 30.0, hr=74.0 + i * 0.1, mov=0.01) for i in range(5)]
-    samples.append(sample(t=150.0, hr=75.0, mov=0.9))   # المستخدم تحرّك
+    samples.append(sample(t=150.0, hr=75.0, mov=0.9))   # the user moved
     evs = run(buf, samples, validator=v)
     cleared = [e for e in evs if e["type"] == EV_ALERT_CLEARED]
     assert len(cleared) == 1
-    assert cleared[0]["duration_s"] == 90.0             # من 60.0 إلى 150.0
+    assert cleared[0]["duration_s"] == 90.0             # from 60.0 to 150.0
 
 
 def test_alert_records_that_movement_was_unverified(buf):
-    """إنذار أُطلق بلا تأكيد حركة يجب أن يُميَّز في السجلّ، لا أن يبدو كإنذار مؤكَّد."""
+    """An alert raised without confirmed movement must be marked in the log, not look like a confirmed one."""
     v = Validator(immobility_limit_s=60.0)
     samples = [sample(t=i * 30.0, hr=74.0 + i * 0.1, mov=None) for i in range(4)]
     evs = run(buf, samples, validator=v)
@@ -190,7 +190,7 @@ def test_alert_records_that_movement_was_unverified(buf):
     assert "MOVEMENT_UNVERIFIED" in raised["flags"]
 
 
-# ── التكامل والقراءة اللاحقة ──
+# ── Integration and read-back ──
 def test_full_scenario_log_is_readable_back_from_disk(tmp_path):
     from mock_sensor import MockSensor, default_scenario
 
@@ -206,13 +206,14 @@ def test_full_scenario_log_is_readable_back_from_disk(tmp_path):
     counts = summarize(str(path))
     assert counts[EV_SESSION_START] == 1
     for expected in (EV_REJECTED, EV_NO_CONTACT, EV_WARN, EV_ALERT_RAISED):
-        assert counts.get(expected, 0) > 0, f"السجلّ لم يوثّق {expected}"
+        assert counts.get(expected, 0) > 0, f"the log did not record {expected}"
 
 
 def test_a_corrupt_line_does_not_destroy_the_whole_log(tmp_path):
     """
-    انقطاع كهرباء أو كتابة متزامنة قد يفسد سطرًا. رفض الملف كله بسببه
-    يعني فقدان مئات الأحداث السليمة قبله — والصيغة اختيرت لتحتمل هذا.
+    A power cut or a concurrent write may corrupt one line. Rejecting the whole
+    file for it means losing hundreds of valid events before it — the format was
+    chosen to tolerate exactly this.
     """
     path = tmp_path / "audit_log.jsonl"
     v = Validator()
@@ -221,13 +222,13 @@ def test_a_corrupt_line_does_not_destroy_the_whole_log(tmp_path):
         log.log_result(sample(hr=320.0), v.validate(sample(hr=320.0)))
 
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write('{"type": "rejected", "t": 1.0\n')      # سطر مقتطع
-        fh.write('}{"type": "warn"}\n')                  # سطران متداخلان
+        fh.write('{"type": "rejected", "t": 1.0\n')      # truncated line
+        fh.write('}{"type": "warn"}\n')                  # two lines run together
 
     counts = summarize(str(path))
-    assert counts[EV_SESSION_START] == 1        # ما قبل الفساد لم يضع
+    assert counts[EV_SESSION_START] == 1        # nothing before the corruption was lost
     assert counts[EV_REJECTED] == 1
-    assert counts[EV_CORRUPT] == 2              # والفساد معلن لا مبتلع
+    assert counts[EV_CORRUPT] == 2              # and the corruption is reported, not swallowed
 
 
 def test_appending_does_not_erase_a_previous_session(tmp_path):

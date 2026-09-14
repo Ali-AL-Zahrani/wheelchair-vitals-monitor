@@ -1,8 +1,8 @@
 """
-تشغيل كامل end-to-end: حسّاس وهمي ⟵ مدقّق ⟵ شاشة، ثم ملخّص إحصائي.
+Full end-to-end run: mock sensor ⟵ validator ⟵ screen, then a statistical summary.
 
-الشاشة هنا نصّية (بروتوتايب)، لكنها تلتزم بالقاعدة الثابتة:
-**لا تقرأ إلا من مخرجات المدقّق.** لا رقم خام يصل عين المستخدم.
+The screen here is text-only (prototype), but it obeys the fixed rule:
+**it reads from validator output only.** No raw number reaches the user's eyes.
 """
 
 from __future__ import annotations
@@ -18,15 +18,17 @@ from mock_sensor import MockSensor, default_scenario
 from validator import FIELD_SPECS, Status, Validator
 
 N_SAMPLES = 120
-AUDIT_LOG_PATH = "audit_log.jsonl"      # سجلّ تدقيق: لماذا رُفضت قراءة
-CSV_PATH = "measurements.csv"           # بيانات قياس: ما اجتاز التدقيق
+AUDIT_LOG_PATH = "audit_log.jsonl"      # audit trail: why a reading was rejected
+CSV_PATH = "measurements.csv"           # measurement data: what passed validation
 
-# منطق العرض كله في display.py: الطرفية والشاشة الرسومية تقرآن من مصدر واحد،
-# فلا تتفرّع قاعدة "متى يُعرض رقم" إلى نسختين تتباعدان مع أول تعديل.
+# All display logic lives in display.py: the terminal and the graphical screen
+# read from one source, so the "when a number is shown" rule never forks into
+# two copies that drift apart at the first edit.
 
 
 def main() -> None:
-    # الطرفية على ويندوز قد تكون cp1256؛ نجبر UTF-8 حتى لا ينكسر النص العربي.
+    # The Windows console may default to a legacy code page; force UTF-8 so
+    # icons and symbols render correctly.
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except (AttributeError, OSError):
@@ -37,7 +39,7 @@ def main() -> None:
     audit = AuditLogger(path=AUDIT_LOG_PATH)
     audit.log_session_start(validator)
     export = MeasurementExporter(path=CSV_PATH)
-    export.write_meta(validator)        # البيانات بلا عتباتها لا تُفسَّر
+    export.write_meta(validator)        # data without its thresholds cannot be interpreted
 
     status_counts: Dict[str, Counter] = {name: Counter() for name in FIELD_SPECS}
     flag_counts: Counter = Counter()
@@ -83,7 +85,8 @@ def main() -> None:
             shown = c.get(Status.VALID.value, 0) + c.get(Status.WARN.value, 0)
             tail = f"⟵ shown to user: {shown}/{N_SAMPLES}"
         else:
-            # الحركة تقود إنذار الخمول ولا تظهر على الشاشة — عدّها كـ"معروضة" كذب على القارئ.
+            # Movement drives the immobility alert and never appears on screen —
+            # counting it as "shown" would lie to the reader.
             tail = "⟵ internal indicator (never displayed)"
         print(f"{LABELS[name]:<17} {row}   {tail}")
     print()

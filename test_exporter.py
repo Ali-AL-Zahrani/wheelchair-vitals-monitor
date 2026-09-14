@@ -1,8 +1,9 @@
 """
-اختبارات تصدير القياسات.
+Tests for the measurement export.
 
-ما تحرسه: ملف البيانات لا يُدخل رقمًا لم يجتز التدقيق، ولا يخلط
-"لا قياس" بـ"قياس قيمته صفر" — الخلط الثاني يفسد كل تحليل لاحق بصمت.
+What they guard: the data file never admits a number that failed validation, and
+never confuses "no measurement" with "a measurement of zero" — the second
+confusion silently corrupts every later analysis.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ def run(buf, samples, validator=None):
     return rows(buf)
 
 
-# ── بنية الملف ──
+# ── File structure ──
 def test_header_covers_every_field_with_its_unit():
     cols = header_row()
     assert "heart_rate_bpm" in cols and "heart_rate_status" in cols
@@ -55,14 +56,14 @@ def test_file_is_parsable_by_a_standard_csv_reader():
     assert out and all(len(r) == len(header_row()) for r in out)
 
 
-# ── القاعدة المركزية: لا رقم غير متحقَّق، ولا صفر مكان الفراغ ──
+# ── The central rule: no unverified number, and no zero in place of a blank ──
 def test_rejected_reading_leaves_an_empty_cell_not_a_zero():
     """
-    الصفر قيمة قياس، والفراغ غياب قياس. خلطهما يُدخل نبضًا = 0
-    في متوسط التحليل ويوهم بقراءة لم تحدث.
+    A zero is a measured value; an empty cell is the absence of one. Mixing them
+    puts heart rate = 0 into the analysis mean and implies a reading that never happened.
     """
     buf = io.StringIO()
-    row = run(buf, [sample(hr=320.0)])[0]        # مستحيل فيزيائيًا
+    row = run(buf, [sample(hr=320.0)])[0]        # physically impossible
     assert row["heart_rate_bpm"] == ""
     assert row["heart_rate_status"] == Status.INVALID.value
 
@@ -72,8 +73,8 @@ def test_no_contact_empties_every_wrist_column():
     row = run(buf, [sample(ir=900.0, hr=72.0, spo2=98.0, temp=33.0)])[0]
     assert row["contact"] == "0"
     for col in ("heart_rate_bpm", "spo2_pct", "skin_temp_c"):
-        assert row[col] == "", f"{col}: رقم صُدِّر بلا تلامس"
-    assert row["movement_idx"] != ""              # مصدرها منفصل عن المسند
+        assert row[col] == "", f"{col}: a number was exported without contact"
+    assert row["movement_idx"] != ""              # its source is separate from the armrest
 
 
 def test_nan_never_reaches_the_data_file():
@@ -84,7 +85,7 @@ def test_nan_never_reaches_the_data_file():
 
 
 def test_warned_value_is_exported_with_its_status():
-    """القيمة الشاذّة الممكنة قياس حقيقي — تُصدَّر، ويُصدَّر معها أنها مُعلَّمة."""
+    """An abnormal-but-possible value is a real measurement — exported, and exported with its flag."""
     buf = io.StringIO()
     row = run(buf, [sample(spo2=89.0)])[0]
     assert float(row["spo2_pct"]) == 89.0
@@ -99,7 +100,7 @@ def test_valid_values_match_the_validator_output():
     assert row["heart_rate_status"] == Status.VALID.value
 
 
-# ── الإنذارات والمؤقّتات ──
+# ── Alerts and timers ──
 def test_alerts_and_timers_are_exported():
     buf = io.StringIO()
     v = Validator(immobility_limit_s=60.0)
@@ -116,13 +117,13 @@ def test_multiple_flags_share_a_cell_without_breaking_columns():
     out = run(buf, [sample(t=i * 30.0, ir=9_999_999.0) for i in range(3)], validator=v)
     last = out[-1]
     assert "IR_IMPLAUSIBLE" in last["flags"] and "NO_CONTACT" in last["flags"]
-    assert ";" in last["flags"]                    # الفاصل لا يكسر بنية الـ CSV
+    assert ";" in last["flags"]                    # the separator does not break the CSV structure
     assert len(last) == len(header_row())
 
 
-# ── ملف العتبات المصاحب ──
+# ── Companion threshold file ──
 def test_meta_file_carries_the_thresholds_and_the_calibration_state(tmp_path):
-    """بيانات بلا عتباتها لا تُفسَّر: عمود status بلا حدوده رقم بلا معنى."""
+    """Data without its thresholds cannot be interpreted: a status column without its bounds is meaningless."""
     path = tmp_path / "measurements.csv"
     v = Validator(immobility_limit_s=123.0)
     with MeasurementExporter(path=str(path), session_id="t1") as exp:
@@ -133,14 +134,14 @@ def test_meta_file_carries_the_thresholds_and_the_calibration_state(tmp_path):
     assert saved == meta
     assert saved["thresholds"]["IMMOBILITY_LIMIT_S"] == 123.0
     assert saved["field_limits"]["spo2"]["clinical_min"] == 94.0
-    assert saved["field_limits"]["movement"]["sanity_max"] is None   # inf لا يُكتب رقمًا
+    assert saved["field_limits"]["movement"]["sanity_max"] is None   # inf is not written as a number
 
 
 def test_meta_explains_that_an_empty_cell_is_not_a_zero(tmp_path):
     path = tmp_path / "m.csv"
     with MeasurementExporter(path=str(path)) as exp:
         meta = exp.write_meta(Validator())
-    assert "صفر" in meta["notes"]["empty_cell"]
+    assert "zero" in meta["notes"]["empty_cell"]
 
 
 def test_row_count_tracks_written_rows(tmp_path):

@@ -1,14 +1,16 @@
 """
-طبقة العرض — تحويل مخرجات المدقّق إلى ما تراه عين المستخدم. **منطق خالص بلا رسم**.
+Display layer — turns validator output into what the user's eyes see. **Pure logic, no rendering**.
 
-فُصلت عن الراسم عمدًا: قاعدة "متى يُعرض رقم ومتى لا يُعرض" قاعدة **سلامة**،
-لا تفصيلة تصميم. تُكتب مرة واحدة، تُختبر آليًا، ويستهلكها أي راسم
-(صفحة الشاشة في screen.py، الطرفية في demo.py، وشاشة العتاد لاحقًا).
+Deliberately separated from the renderer: the rule "when a number may be shown
+and when it may not" is a **safety** rule, not a design detail. It is written
+once, tested automatically, and consumed by every renderer (the web page in
+screen.py, the terminal in demo.py, and the hardware screen later).
 
-القاعدة الحاكمة: **"لا قراءة" أصدق من قراءة مغلوطة.**
-أي حالة ليست VALID/WARN ⇒ لا رقم إطلاقًا: لا رقم قديم، ولا صفر، ولا شرطة تُقرأ كقيمة.
+Governing rule: **"no reading" is more honest than a wrong reading.**
+Any state that is not VALID/WARN ⇒ no number at all: no stale number, no zero,
+no dash that could be read as a value.
 
-مدخل هذه الطبقة الوحيد هو ValidationResult. لا تلمس VitalSample الخام أبدًا.
+The only input to this layer is ValidationResult. It never touches a raw VitalSample.
 """
 
 from __future__ import annotations
@@ -27,24 +29,26 @@ from validator import (
     ValidationResult,
 )
 
-# ما يُعرض للمستخدم: قيم المعصم فقط.
-# movement مؤشّر داخلي يقود إنذار الخمول — رقم لا يعني المستخدم شيئًا، فلا يُعرض.
+# What is shown to the user: wrist values only.
+# movement is an internal indicator driving the immobility alert — a number that
+# means nothing to the user, so it is never displayed.
 PATIENT_FIELDS = ("heart_rate", "spo2", "skin_temp")
 
-# التسمية تعكس ما يُقاس فعلًا: "حرارة جلد المعصم" لا "حرارة الجسم".
-# تسمية مضلِّلة على شاشة مستخدم = خطأ طبي، لا مسألة صياغة.
+# Labels describe what is actually measured: "Wrist Skin Temp", not "Body Temp".
+# A misleading label on a user screen is a medical error, not a wording choice.
 LABELS: Dict[str, str] = {
     "heart_rate": "Heart Rate",
     "spo2": "Blood Oxygen",
-    "skin_temp": "Wrist Skin Temp",   # ليست Body Temp — التسمية تصف موضع القياس
+    "skin_temp": "Wrist Skin Temp",   # not Body Temp — the label names the measurement site
     "movement": "Movement",
 }
 
-# عدد الخانات العشرية المعروضة. النبض والأكسجين بلا كسور:
-# دقّة كاذبة على شاشة مستخدم توحي بيقين غير موجود، خصوصًا وSpO2 من المعصم مؤشّر اتجاه.
+# Displayed decimal places. Heart rate and oxygen without decimals: false
+# precision on a user screen implies certainty that does not exist, especially
+# as wrist SpO2 is a trend indicator.
 DECIMALS: Dict[str, int] = {"heart_rate": 0, "spo2": 0, "skin_temp": 1}
 
-# لا اعتماد على اللون وحده: أيقونة **و** نص مع كل حالة (عمى ألوان + ضعف بصر).
+# Never colour alone: an icon **and** text with every state (colour blindness, low vision).
 ICON_WARN = "⚠"
 ICON_INVALID = "⛔"
 ICON_NO_CONTACT = "✋"
@@ -58,26 +62,26 @@ MSG_INVALID = "Reading unavailable"
 MSG_NO_CONTACT = "Rest your wrist on the armrest"
 MSG_MOVE = "Time to move"
 MSG_LIFT_WRIST = "Lift your wrist off the armrest"
-# النصّان أدناه يخاطبان المرافق لا المستخدم.
+# The two messages below address the caregiver, not the user.
 MSG_SENSOR_FAULT = "Device fault — needs checking"
 MSG_SILENT = "Monitoring stopped — no readings"
 
-# نائب القيمة الغائبة. مقصود ألا يشبه رقمًا بأي حال.
+# Placeholder for an absent value. Deliberately nothing that resembles a number.
 NO_VALUE_TEXT = "—"
 
 
 class Severity(str, Enum):
-    """شدّة العرض — يترجمها الراسم إلى لون/حجم، ولا يقرّر بنفسه شيئًا."""
+    """Display severity — the renderer maps it to colour/size and decides nothing itself."""
 
-    NORMAL = "NORMAL"    # رقم سليم
-    WARN = "WARN"        # رقم يُعرض مع تمييز
-    ALERT = "ALERT"      # إجراء مطلوب من المستخدم الآن
-    BLOCKED = "BLOCKED"  # لا رقم — القراءة محجوبة
+    NORMAL = "NORMAL"    # a valid number
+    WARN = "WARN"        # a number shown with emphasis
+    ALERT = "ALERT"      # action required from the user now
+    BLOCKED = "BLOCKED"  # no number — the reading is withheld
 
 
 @dataclass(frozen=True)
 class Tile:
-    """بطاقة قياس واحدة على الشاشة. value_text=None يعني: **لا تطبع رقمًا**."""
+    """One measurement card on the screen. value_text=None means: **print no number**."""
 
     name: str
     label: str
@@ -101,9 +105,9 @@ class Tile:
 
 @dataclass(frozen=True)
 class Banner:
-    """شريط عرضي فوق البطاقات: إجراء مطلوب أو سبب حجب عام."""
+    """A full-width strip above the cards: a required action or a general reason for blanking."""
 
-    kind: str          # "movement" أو "contact"
+    kind: str          # "movement" or "contact"
     icon: str
     text: str
     severity: Severity
@@ -120,9 +124,9 @@ class Banner:
 @dataclass(frozen=True)
 class ScreenModel:
     """
-    وصف كامل لِما يجب أن يظهر على الشاشة في لحظة واحدة.
+    A complete description of what must appear on the screen at one instant.
 
-    الراسم ينفّذ هذا الوصف حرفيًا ولا يضيف عليه ولا يستنتج.
+    The renderer executes this description literally; it adds nothing and infers nothing.
     """
 
     t: float
@@ -130,7 +134,7 @@ class ScreenModel:
     contact: bool
     tiles: List[Tile]
     banners: List[Banner]
-    needs_sound: bool  # هل هذه اللحظة تستدعي تنبيهًا صوتيًا (لا بصريًا فقط)؟
+    needs_sound: bool  # does this instant call for an audible alert (not only visual)?
 
     def tile(self, name: str) -> Tile:
         for tile in self.tiles:
@@ -150,7 +154,7 @@ class ScreenModel:
 
 
 def format_clock(seconds: float) -> str:
-    """زمن الجلسة الافتراضي. الساعات تظهر فقط عند تجاوزها — تقليلًا للضجيج البصري."""
+    """Virtual session time. Hours appear only once exceeded — less visual noise."""
     total = int(max(0.0, seconds))
     h, m, s = total // 3600, (total % 3600) // 60, total % 60
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
@@ -167,8 +171,8 @@ def _build_tile(name: str, result: ValidationResult) -> Tile:
     status = field_result.status
     value = field_result.value
 
-    # حارس دفاعي: حالة تدّعي وجود رقم بلا رقم = خلل في المصدر.
-    # الأأمن أن تُعامل كقراءة متعذّرة، لا أن يُطبع فراغ مكان الرقم.
+    # Defensive guard: a status claiming a number without one = a fault upstream.
+    # Safest to treat it as an unavailable reading, not to print a blank where the number was.
     if status in (Status.VALID, Status.WARN) and value is None:
         status = Status.INVALID
 
@@ -177,7 +181,7 @@ def _build_tile(name: str, result: ValidationResult) -> Tile:
                     "", None, Severity.NORMAL)
 
     if status is Status.WARN:
-        # الرقم يُعرض — لأنه قياس حقيقي — لكن مع أيقونة ونص، لا لون وحده.
+        # The number is shown — it is a real measurement — but with icon and text, never colour alone.
         return Tile(name, label, unit, _format_value(name, float(value)),
                     ICON_WARN, MSG_WARN, Severity.WARN)
 
@@ -185,22 +189,23 @@ def _build_tile(name: str, result: ValidationResult) -> Tile:
         return Tile(name, label, unit, None,
                     ICON_NO_CONTACT, MSG_NO_CONTACT, Severity.BLOCKED)
 
-    # INVALID: السبب التقني (NaN/تجمّد/قفزة) لا يعني المستخدم — رسالة واحدة واضحة.
-    # التفصيل مكانه سجلّ التدقيق، لا شاشة المستخدم.
+    # INVALID: the technical reason (NaN / frozen / jump) means nothing to the user — one clear message.
+    # The detail belongs in the audit log, not on the user screen.
     return Tile(name, label, unit, None, ICON_INVALID, MSG_INVALID, Severity.BLOCKED)
 
 
 def build_screen(result: ValidationResult) -> ScreenModel:
     """
-    ValidationResult ⟵ المصدر الوحيد. لا مدخل آخر لهذه الدالة، ولا ذاكرة بين اللحظات:
-    الشاشة انعكاس للحظة الحالية فقط، فلا يمكن أن يبقى رقم قديم معروضًا بالخطأ.
+    ValidationResult ⟵ the only source. No other input to this function, and no
+    memory between instants: the screen reflects the current instant only, so a
+    stale number can never remain displayed by mistake.
     """
     tiles = [_build_tile(name, result) for name in PATIENT_FIELDS]
 
     banners: List[Banner] = []
 
-    # الترتيب مقصود ومرتّب بالخطر، لا بترتيب الاكتشاف في الكود:
-    # خطر التقرّح (الجسم ثم المعصم) ⟵ ثم تعطّل المراقبة ⟵ ثم فقد التلامس العادي.
+    # Order is deliberate and ranked by risk, not by discovery order in the code:
+    # pressure-injury risk (body, then wrist) ⟵ then monitoring failure ⟵ then ordinary contact loss.
     if ALERT_NEEDS_MOVEMENT in result.alerts:
         banners.append(Banner("movement", ICON_MOVE, MSG_MOVE, Severity.ALERT))
 
@@ -213,14 +218,14 @@ def build_screen(result: ValidationResult) -> ScreenModel:
     if ALERT_MEASUREMENT_SILENT in result.alerts:
         banners.append(Banner("silent", ICON_SILENT, MSG_SILENT, Severity.ALERT))
 
-    # رسالة تلامس واحدة عامة بدل تكرارها في ثلاث بطاقات — سبب واحد ونداء واحد.
-    # تُحجب عند وجود عطب: "ضع معصمك" نداء لا يُصلح جهازًا معطوبًا، وتكراره
-    # يدفع المستخدم لضغط معصمه أكثر بلا فائدة.
+    # One general contact message instead of repeating it on three cards — one cause, one prompt.
+    # Suppressed during a fault: "rest your wrist" cannot fix a broken device, and
+    # repeating it pushes the user to press the wrist harder for nothing.
     if not result.contact and ALERT_SENSOR_FAULT not in result.alerts:
         banners.append(Banner("contact", ICON_NO_CONTACT, MSG_NO_CONTACT, Severity.BLOCKED))
 
-    # التنبيه البصري وحده لا يكفي: المستخدم قد يكون غير ناظر للشاشة،
-    # والمرافق قد يكون في غرفة أخرى. كل إنذار يستدعي صوتًا.
+    # A visual alert alone is not enough: the user may not be looking at the
+    # screen, and the caregiver may be in another room. Every alert calls for sound.
     needs_sound = any(b.severity is Severity.ALERT for b in banners)
 
     model = ScreenModel(
@@ -232,11 +237,11 @@ def build_screen(result: ValidationResult) -> ScreenModel:
         needs_sound=needs_sound,
     )
 
-    # ثابتة السلامة، مؤكَّدة عند التوليد لا عند الرسم فقط:
-    # بطاقة محجوبة لا تحمل رقمًا بأي حال من الأحوال.
+    # Safety invariant, asserted at construction, not only at render time:
+    # a blocked card never carries a number under any circumstances.
     for tile in model.tiles:
         assert not (tile.severity is Severity.BLOCKED and tile.value_text is not None), (
-            f"خرق قاعدة سلامة: بطاقة محجوبة تحمل رقمًا ({tile.name})"
+            f"Safety rule violated: blocked tile carries a number ({tile.name})"
         )
     return model
 
@@ -244,21 +249,20 @@ def build_screen(result: ValidationResult) -> ScreenModel:
 @dataclass(frozen=True)
 class CarerModel:
     """
-    شاشة المرافق — **ملخّص ما يحتاج تدخّلًا**، لا نسخة ثانية من شاشة المستخدم.
+    Caregiver screen — **a summary of what needs intervention**, not a second copy of the user screen.
 
-    الفرق مقصود: المرافق قد يكون في غرفة أخرى ولا يتابع الأرقام لحظة بلحظة،
-    فما يفيده هو "هل يوجد ما يستدعي التدخّل الآن، ومنذ متى".
-
-    ⚠️ تُبنى على نفس الحدود السريرية **غير المعايرة**، فترث القيد نفسه.
+    The difference is deliberate: the caregiver may be in another room and not
+    following the numbers moment by moment; what helps them is "is there
+    something that needs intervention now, and for how long".
     """
 
     clock: str
-    attention: bool                 # هل يوجد ما يستدعي تدخّلًا الآن؟
-    monitoring: bool                # هل يصل أي رقم أصلًا؟
-    alerts: List[Banner]            # إجراءات مطلوبة
-    abnormal: List[Tile]            # قراءات شاذّة معروضة (WARN)
-    blocked: List[Tile]             # قراءات متعذّرة
-    normal: List[Tile]              # قراءات سليمة — للطمأنة لا للمتابعة
+    attention: bool                 # is there anything that needs intervention now?
+    monitoring: bool                # is any number arriving at all?
+    alerts: List[Banner]            # required actions
+    abnormal: List[Tile]            # abnormal readings that are displayed (WARN)
+    blocked: List[Tile]             # unavailable readings
+    normal: List[Tile]              # valid readings — for reassurance, not monitoring
     immobility_s: float
     wrist_rest_s: float
     silence_s: float
@@ -280,13 +284,14 @@ class CarerModel:
 
 def build_carer_screen(result: ValidationResult) -> CarerModel:
     """
-    تُشتقّ من نفس ScreenModel — فقاعدة "متى يُعرض رقم" واحدة على الشاشتين.
-    شاشة المرافق **لا تكشف رقمًا حجبته شاشة المستخدم**: القراءة المرفوضة مرفوضة
-    للطرفين، وكونه مرافقًا لا يجعل الرقم التالف صالحًا.
+    Derived from the same ScreenModel — so the "when a number is shown" rule is
+    one rule on both screens. The caregiver screen **never reveals a number the
+    user screen withheld**: a rejected reading is rejected for both parties;
+    being a caregiver does not make a corrupt number valid.
     """
     model = build_screen(result)
-    # "لا يوجد ما يستدعي التدخّل" بينما لا يصل رقم واحد = طمأنة كاذبة.
-    # هي بالضبط الحالة التي بُني لأجلها إنذار الصمت، لكن قبل بلوغ حدّه الزمني.
+    # "Nothing needs attention" while not a single number arrives = false reassurance.
+    # It is exactly the state the silence alert was built for, before its time limit is reached.
     monitoring = any(t.value_text is not None for t in model.tiles)
     return CarerModel(
         clock=model.clock,
@@ -305,8 +310,8 @@ def build_carer_screen(result: ValidationResult) -> CarerModel:
 
 def render_line(result: ValidationResult) -> str:
     """
-    عرض نصّي لسطر واحد (الطرفية/السجلّ). يستهلك **نفس** ScreenModel،
-    حتى لا تتفرّع قاعدة العرض إلى نسختين تتباعدان مع الوقت.
+    One-line text rendering (terminal / log). Consumes the **same** ScreenModel,
+    so the display rule never forks into two copies that drift apart over time.
     """
     model = build_screen(result)
     parts = []

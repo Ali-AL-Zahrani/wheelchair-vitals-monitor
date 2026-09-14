@@ -1,8 +1,9 @@
 """
-نموذج العيّنة الحيوية + الواجهة المجرّدة للحسّاس.
+Vital-sample model + abstract sensor interface.
 
-هذا الملف هو **نقطة تبديل المحاكاة بالعتاد**: أي حسّاس فعلي (I2CSensor)
-يرث SensorInterface ويطبّق read() فقط، دون لمس المدقّق ولا الشاشة.
+This file is the **swap point between simulation and hardware**: any physical
+sensor (I2CSensor) inherits SensorInterface and implements read() only,
+without touching the validator or the screen.
 """
 
 from __future__ import annotations
@@ -15,41 +16,44 @@ from typing import Optional
 @dataclass
 class VitalSample:
     """
-    عيّنة خام واحدة كما تخرج من الحسّاس — **قبل** أي تدقيق.
+    One raw sample exactly as it leaves the sensor — **before** any validation.
 
-    كل الحقول Optional لأن الحسّاس قد يفشل في أي قناة على حدة،
-    وتمثيل الفشل بـ None أصدق من تمثيله بصفر (الصفر يشبه قراءة حقيقية).
+    Every field is Optional because the sensor may fail on any single channel,
+    and representing failure as None is more honest than a zero (a zero looks
+    like a real reading).
 
-    الأسماء تعكس ما يُقاس فعلًا:
-      - skin_temp = حرارة جلد المعصم، **ليست** حرارة الجسم المركزية.
-      - spo2 من وضع reflectance في المعصم = مؤشّر اتجاه، لا قيمة سريرية مطلقة.
-        إشارة PPG من المعصم أضعف من راحة اليد وأضعف بكثير من مشبك الإصبع.
-      - movement مصدره **منفصل** عن المسند (FSR أو IMU — لم يُحسم بعد).
+    Names describe what is actually measured:
+      - skin_temp = wrist skin temperature, **not** core body temperature.
+      - spo2 from reflectance mode at the wrist = a trend indicator, not an
+        absolute clinical value. The PPG signal at the wrist is weaker than the
+        palm and far weaker than a fingertip clip.
+      - movement comes from a source **separate** from the armrest (IMU).
     """
 
-    t: float                        # زمن العيّنة بالثواني من بدء الجلسة (ساعة الحسّاس، لا ساعة النظام)
-    ir_dc: Optional[float] = None   # المكوّن المستمر لقناة IR في MAX30102 — الدليل الوحيد على استناد المعصم
-    heart_rate: Optional[float] = None   # نبضة/دقيقة (PPG)
-    spo2: Optional[float] = None         # تشبّع الأكسجين %
-    skin_temp: Optional[float] = None    # حرارة جلد المعصم °C (MAX30205)
-    movement: Optional[float] = None     # مؤشّر حركة عام من مصدر منفصل عن المسند
+    t: float                        # sample time in seconds since session start (sensor clock, not system clock)
+    ir_dc: Optional[float] = None   # DC component of the MAX30102 IR channel — the only evidence a wrist is resting
+    heart_rate: Optional[float] = None   # beats per minute (PPG)
+    spo2: Optional[float] = None         # oxygen saturation %
+    skin_temp: Optional[float] = None    # wrist skin temperature °C (MAX30205)
+    movement: Optional[float] = None     # general movement index from a source separate from the armrest
 
 
 class SensorInterface(ABC):
     """
-    العقد الذي يلتزم به أي مصدر بيانات: المحاكاة اليوم، العتاد لاحقًا.
+    The contract every data source honours: simulation today, hardware later.
 
-    الشرط الوحيد: read() تُعيد VitalSample واحدة أو ترفع استثناء.
-    الحسّاس **لا يدقّق ولا يصحّح ولا يخفي** قراءة سيئة — التدقيق مسؤولية Validator وحده.
+    The only requirement: read() returns one VitalSample or raises.
+    The sensor **never validates, corrects or hides** a bad reading — validation
+    is the Validator's responsibility alone.
     """
 
     @abstractmethod
     def read(self) -> VitalSample:
-        """تُعيد العيّنة التالية كما هي، بلا تنقية."""
+        """Return the next sample as-is, with no filtering."""
         raise NotImplementedError
 
     def start(self) -> None:
-        """تهيئة العتاد (I2C, تشغيل الـ LED...). لا شيء في المحاكاة."""
+        """Hardware initialisation (I2C, LED power-on, ...). No-op in simulation."""
 
     def stop(self) -> None:
-        """إغلاق نظيف للعتاد. لا شيء في المحاكاة."""
+        """Clean hardware shutdown. No-op in simulation."""

@@ -1,20 +1,19 @@
 """
-شاشة المستخدم — الراسم. يعرض **وصف display.py حرفيًا** ولا يقرّر شيئًا بنفسه.
+User screen — the renderer. Displays **the display.py description literally** and decides nothing itself.
 
-لماذا صفحة ويب محلية بدل نافذة سطح مكتب:
-  - Tk على ويندوز لا يصل الحروف العربية (تظهر منفصلة ومقلوبة) ⟵ شاشة مستخدم غير مقروءة.
-  - RTL وخط كبير وتباين عالٍ جاهزة ومضبوطة في الويب.
-  - الشكل الأقرب للمنتج الفعلي: تابلت مثبّت على الكرسي.
-  - stdlib فقط: لا مكتبة خارجية تُضاف للتسليم.
+Why a local web page instead of a desktop window:
+  - Large type, high contrast and RTL/LTR support are ready-made and reliable on the web.
+  - It is the closest form to the real product: a tablet mounted on the chair.
+  - stdlib only: no external library is added to the deliverable.
 
-المعمارية هنا:
-    MockSensor ⟵ Validator ⟵ AuditLogger ⟵ build_screen()  (خيط خلفي)
+Architecture here:
+    MockSensor ⟵ Validator ⟵ AuditLogger ⟵ build_screen()  (background thread)
                                     ↓ JSON
-                            الصفحة تسحب /state وترسم
+                            the page polls /state and renders
 
-الصفحة لا ترى VitalSample الخام أبدًا؛ لا يعبر إليها إلا ما اجتاز المدقّق.
+The page never sees a raw VitalSample; only what passed the validator reaches it.
 
-التشغيل:  python screen.py
+Run:  python screen.py
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from mock_sensor import MockSensor, default_scenario
 from validator import Validator
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  الحالة المشتركة بين خيط الحسّاس وخيوط الخدمة
+#  State shared between the sensor thread and the server threads
 # ═══════════════════════════════════════════════════════════════════════════
 
 _state_lock = threading.Lock()
@@ -54,21 +53,22 @@ def _snapshot(key: str) -> Optional[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  خيط الحسّاس: نفس مسار demo.py بالضبط، بمعدّل زمن حقيقي قابل للضبط
+#  Sensor thread: exactly the same path as demo.py, at a configurable real-time rate
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _sensor_loop(period_s: float, sample_period_s: float, seed: int,
                  log_path: str, cycle_samples: int, csv_path: Optional[str],
                  clean: bool = False) -> None:
     """
-    الشاشة عرض مستمر، والسيناريو 90 عيّنة فقط. بعد نفادها تصير كل القراءات سليمة
-    للأبد ⟵ من يفتح الشاشة متأخرًا لا يرى أي حالة عرض. لذلك يُعاد تشغيل السيناريو
-    بذرة جديدة على **ساعة متصلة**، بلا تصفير المدقّق: الجلسة واحدة وذاكرتها متصلة،
-    والمتغيّر هو الأعطال المحقونة فقط.
+    The screen is a continuous display, but the scenario is only 120 samples.
+    Once exhausted every reading stays valid forever ⟵ whoever opens the screen
+    late never sees a single display state. So the scenario restarts with a new
+    seed on a **continuous clock**, without resetting the validator: one session
+    with unbroken memory; only the injected faults vary.
     """
     validator = Validator()
     audit = AuditLogger(path=log_path)
-    audit.log_session_start(validator)      # لقطة العتبات: قرار بلا عتبته لا يُدقَّق
+    audit.log_session_start(validator)      # threshold snapshot: a decision without its threshold cannot be audited
     export = MeasurementExporter(path=csv_path) if csv_path else None
     if export:
         export.write_meta(validator)
@@ -84,14 +84,14 @@ def _sensor_loop(period_s: float, sample_period_s: float, seed: int,
             audit.log_result(sample, result)
             if export:
                 export.write(result)
-            # الشاشتان تُبنيان من **نفس** ValidationResult في اللحظة نفسها،
-            # فلا يمكن أن تتناقضا ولا أن تتأخّر إحداهما عن الأخرى.
+            # Both screens are built from the **same** ValidationResult at the same
+            # instant, so they can never contradict each other or lag behind one another.
             _publish(build_screen(result).to_dict(),
                      build_carer_screen(result).to_dict())
 
             if sensor.index >= cycle_samples - 1:
-                # الساعة تُستأنف من العيّنة التالية لا من نفس اللحظة،
-                # وإلا تكرّر طابع زمني واحد وارتبك حساب الخمول.
+                # The clock resumes from the next sample, not the same instant,
+                # otherwise one timestamp repeats and the immobility maths is confused.
                 sensor.stop()
                 cycle += 1
                 sensor = MockSensor(seed=seed + cycle, sample_period_s=sample_period_s,
@@ -108,11 +108,12 @@ def _sensor_loop(period_s: float, sample_period_s: float, seed: int,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  الصفحة
+#  The page
 # ═══════════════════════════════════════════════════════════════════════════
 
-# STALE_MS: إن انقطع مصدر الحالة، تُمسح الأرقام فورًا وتُعلن الشاشة انقطاعها.
-# شاشة تتجمّد على آخر رقم أخطر من شاشة فارغة — المستخدم يقرأها كقياس حيّ.
+# STALE_MS: if the state source stops, the numbers are wiped immediately and the
+# screen announces the disconnection. A screen frozen on the last number is more
+# dangerous than an empty one — the user reads it as a live measurement.
 PAGE = """<!doctype html>
 <html lang="en" dir="ltr">
 <head>
@@ -187,12 +188,12 @@ PAGE = """<!doctype html>
   </footer>
 
 <script>
-const STALE_MS = 3000;      // بعدها تُعتبر الحالة منقطعة وتُمسح الأرقام
+const STALE_MS = 3000;      // after this the state is considered lost and the numbers are wiped
 const POLL_MS  = 250;
 let lastOk = 0, alerting = false, audio = null, lastBeep = 0;
 
 document.getElementById("sound").addEventListener("click", (e) => {
-  // المتصفّحات تمنع الصوت قبل تفاعل المستخدم — لذلك زرّ صريح.
+  // Browsers block audio before a user gesture — hence an explicit button.
   audio = audio || new (window.AudioContext || window.webkitAudioContext)();
   audio.resume();
   const on = e.currentTarget.dataset.on === "1" ? "0" : "1";
@@ -230,8 +231,8 @@ function banner(b) {
   return el;
 }
 
-// الساعة تعرض الوقت الحقيقي للجهاز، لا زمن الجلسة الافتراضي.
-// مستقلّة عن وصول البيانات عمدًا: ساعة الحائط تبقى صحيحة ولو انقطع الحسّاس.
+// The clock shows the device's real time, not the virtual session time.
+// Deliberately independent of data arrival: the wall clock stays correct even if the sensor drops out.
 function tickClock() {
   const d = new Date();
   document.getElementById("clock").textContent =
@@ -245,7 +246,7 @@ function draw(model) {
   const bannersEl = document.getElementById("banners");
   bannersEl.replaceChildren(...model.banners.map(banner));
 
-  // إعادة التنبيه كل 8 ث ما دام الإنذار قائمًا — نداء واحد قد يفوت المستخدم.
+  // Repeat the beep every 8 s while the alert is active — a single call can be missed.
   const now = Date.now();
   if (model.needs_sound) {
     if (!alerting || now - lastBeep > 8000) { beep(); lastBeep = now; }
@@ -254,7 +255,7 @@ function draw(model) {
 }
 
 function drawDisconnected() {
-  // انقطع المصدر: لا رقم يبقى معروضًا. شاشة متجمّدة تُقرأ كقياس حيّ.
+  // Source lost: no number stays on screen. A frozen screen reads as a live measurement.
   document.getElementById("banners").replaceChildren(banner(
     { severity:"BLOCKED", icon:"⛔", text:"Connection lost — no readings" }));
   document.querySelectorAll(".tile").forEach(el => {
@@ -269,7 +270,7 @@ async function poll() {
     const res = await fetch("/state", { cache:"no-store" });
     const data = await res.json();
     if (data.model) { draw(data.model); lastOk = Date.now(); }
-  } catch (e) { /* يعالَج أدناه بمنطق التقادم */ }
+  } catch (e) { /* handled below by the staleness logic */ }
   if (Date.now() - lastOk > STALE_MS) drawDisconnected();
 }
 lastOk = Date.now();
@@ -281,8 +282,9 @@ setInterval(poll, POLL_MS);
 """
 
 
-# شاشة المرافق: ملخّص "ما يستدعي التدخّل"، لا نسخة ثانية من شاشة المستخدم.
-# المرافق قد يكون في غرفة أخرى، فالمطلوب حالة واحدة واضحة من بعيد + منذ متى.
+# Caregiver screen: a summary of "what needs intervention", not a second copy of
+# the user screen. The caregiver may be in another room, so what is needed is one
+# state readable from a distance, plus how long it has been going on.
 CARER_PAGE = """<!doctype html>
 <html lang="en" dir="ltr">
 <head>
@@ -308,7 +310,7 @@ CARER_PAGE = """<!doctype html>
   #status.dark  { background:var(--card); border:3px solid var(--warn); color:var(--warn); }
   .group { display:flex; flex-direction:column; gap:1vh; }
   .group h2 { font-size:clamp(15px,1.6vw,20px); color:var(--muted); font-weight:600; }
-  /* الحدّ السميك بخاصية منطقية لا يمين/يسار — يعمل صحيحًا في LTR وRTL معًا. */
+  /* The thick edge uses a logical property, not left/right — correct in both LTR and RTL. */
   .row { background:var(--card); border:2px solid var(--edge); border-inline-start-width:8px;
          border-radius:12px; padding:1.6vh 1.4vw; display:flex; justify-content:space-between;
          align-items:center; gap:14px; font-size:clamp(16px,1.9vw,26px); }
@@ -338,7 +340,7 @@ function mmss(s) {
   return String(Math.floor(s / 60)).padStart(2, "0") + ":" +
          String(s % 60).padStart(2, "0");
 }
-// الوقت الحقيقي للجهاز — مستقلّ عن وصول البيانات (انظر شاشة المستخدم).
+// Real device time — independent of data arrival (see the user screen).
 function tickClock() {
   const d = new Date();
   document.getElementById("clock").textContent =
@@ -348,7 +350,7 @@ tickClock(); setInterval(tickClock, 1000);
 
 function draw(m) {
   const status = document.getElementById("status");
-  // ثلاث حالات لا اثنتان: "لا يوجد ما يستدعي التدخّل" بينما لا يصل رقم = طمأنة كاذبة.
+  // Three states, not two: "nothing needs attention" while no number arrives = false reassurance.
   if (m.attention)        { status.className = "busy"; status.textContent = "Needs your attention"; }
   else if (!m.monitoring) { status.className = "dark"; status.textContent = "No readings right now"; }
   else                    { status.className = "ok";   status.textContent = "Nothing needs attention"; }
@@ -385,7 +387,7 @@ poll(); setInterval(poll, 400);
 
 
 class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:  # noqa: N802  (توقيع مفروض من المكتبة)
+    def do_GET(self) -> None:  # noqa: N802  (signature imposed by the library)
         if self.path.startswith("/state/carer"):
             body = json.dumps({"model": _snapshot("carer")},
                               ensure_ascii=False).encode("utf-8")
@@ -410,24 +412,24 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *args: Any) -> None:
-        """صمت: سجلّ HTTP ضجيج يخفي مخرجات التشخيص."""
+        """Silence: the HTTP log is noise that buries the diagnostic output."""
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="شاشة المستخدم (بروتوتايب)")
+    parser = argparse.ArgumentParser(description="User screen (prototype)")
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--period", type=float, default=0.5,
-                        help="ثوانٍ حقيقية بين العيّنتين على الشاشة")
+                        help="real seconds between two samples on screen")
     parser.add_argument("--sample-period", type=float, default=30.0,
-                        help="ثوانٍ افتراضية بين العيّنتين (ساعة الحسّاس)")
+                        help="virtual seconds between two samples (sensor clock)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log", default="audit_log.jsonl")
     parser.add_argument("--csv", default=None,
-                        help="مسار تصدير القياسات (بلا هذا الخيار لا يُكتب ملف بيانات)")
+                        help="measurement export path (without it no data file is written)")
     parser.add_argument("--cycle-samples", type=int, default=120,
-                        help="طول دورة السيناريو قبل إعادة حقن الأعطال")
+                        help="scenario cycle length before faults are re-injected")
     parser.add_argument("--clean", action="store_true",
-                        help="تشغيل بلا حقن أعطال — قراءات سليمة متصلة (للعرض)")
+                        help="run without fault injection — continuous clean readings (for demos)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -443,7 +445,7 @@ def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), _Handler)
     print(f"User screen      ⟵ {url}")
     print(f"Caregiver screen ⟵ {url}family    (Ctrl+C to stop)")
-    # عند --period 0.5 و30 ث/عيّنة: حدّ الخمول (20 دقيقة) يُبلَغ خلال ~20 ثانية حقيقية.
+    # At --period 0.5 and 30 s/sample the 15-minute immobility limit is reached in ~15 real seconds.
     if not args.no_browser:
         webbrowser.open(url)
     try:

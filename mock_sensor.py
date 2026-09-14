@@ -1,11 +1,12 @@
 """
-حسّاس وهمي: قراءات واقعية + حقن أعطال مقصودة.
+Mock sensor: realistic readings + deliberate fault injection.
 
-الهدف ليس "بيانات جميلة" بل **إجهاد المدقّق**: انقطاع تلامس، NaN، قيم مستحيلة،
-حسّاس متجمّد، وقفزات artifact، إضافة إلى فترات خمول طويلة لاختبار watchdog.
+The goal is not "pretty data" but **stressing the validator**: contact loss,
+NaN, impossible values, a frozen sensor, artifact jumps, plus long immobility
+stretches to exercise the watchdog.
 
-الساعة افتراضية (30 ث/عيّنة افتراضيًا) حتى نختبر منطق الخمول في ثوانٍ
-بدل الانتظار الحقيقي 20 دقيقة.
+The clock is virtual (30 s/sample by default) so immobility logic can be
+tested in seconds instead of waiting a real 20 minutes.
 """
 
 from __future__ import annotations
@@ -15,16 +16,16 @@ from typing import Dict, Optional
 
 from interface import SensorInterface, VitalSample
 
-# أسماء الأعطال المدعومة (تُسنَد لفهرس العيّنة):
-#   "no_contact"    ⟵ المعصم رُفع: ir_dc ينهار والقيم تصير ضوضاء تشبه قراءة حقيقية
-#   "frozen"        ⟵ حسّاس المعصم معلّق على نفس البِتّات (movement يبقى حيًّا: مصدره جهاز آخر)
-#   "nan_spo2"      ⟵ NaN من قناة الأكسجين
-#   "none_hr"       ⟵ الدرايفر يرجّع None
-#   "impossible_hr" ⟵ قيمة مستحيلة فيزيائيًا
-#   "artifact_hr"   ⟵ قفزة مفاجئة (رعشة/حركة يد)
-#   "warn_spo2"     ⟵ قيمة ممكنة لكن تحت الحد السريري
-#   "ir_broken"     ⟵ ir_dc خارج مدى الـ ADC: عطب درايفر/ناقل، لا رفع معصم
-#   "still"         ⟵ المستخدم ساكن تمامًا (لاختبار إنذار الحركة)
+# Supported fault names (assigned to a sample index):
+#   "no_contact"    ⟵ wrist lifted: ir_dc collapses and the values become noise that looks like a real reading
+#   "frozen"        ⟵ wrist sensor stuck on the same bits (movement stays live: it comes from another device)
+#   "nan_spo2"      ⟵ NaN from the oxygen channel
+#   "none_hr"       ⟵ driver returns None
+#   "impossible_hr" ⟵ physically impossible value
+#   "artifact_hr"   ⟵ sudden jump (tremor / hand movement)
+#   "warn_spo2"     ⟵ possible value but below the clinical bound
+#   "ir_broken"     ⟵ ir_dc outside ADC range: driver/bus fault, not a lifted wrist
+#   "still"         ⟵ user completely still (exercises the movement alert)
 
 _WRIST_FIELDS = ("ir_dc", "heart_rate", "spo2", "skin_temp")
 
@@ -46,7 +47,7 @@ class MockSensor(SensorInterface):
 
     @property
     def index(self) -> int:
-        """فهرس آخر عيّنة أُرجعت (للتشخيص في demo)."""
+        """Index of the last sample returned (for diagnostics in demo)."""
         return self._i
 
     def read(self) -> VitalSample:
@@ -55,9 +56,9 @@ class MockSensor(SensorInterface):
             self._t += self._period
         fault = self._faults.get(self._i)
 
-        # قاعدة واقعية: بالغ مستريح، معصمه مستند على المسند.
-        # ir_dc بنطاق معصم. يبقى متسقًا مع CONTACT_IR_THRESHOLD في validator.py؛
-        # أي تغيير في أحدهما يوجب الآخر.
+        # Realistic baseline: a resting adult with the wrist on the armrest.
+        # ir_dc in the wrist range. Kept consistent with CONTACT_IR_THRESHOLD in
+        # validator.py; changing one requires the other.
         ir_dc = self._rng.gauss(38_000, 3_500)
         heart_rate = self._rng.gauss(74, 3)
         spo2 = min(100.0, self._rng.gauss(97.0, 0.8))
@@ -65,7 +66,7 @@ class MockSensor(SensorInterface):
         movement = self._movement()
 
         if fault == "no_contact":
-            # لا معصم: الحسّاس ما زال يطلّع أرقامًا — وهذه بالضبط الخطورة.
+            # No wrist: the sensor still outputs numbers — that is exactly the danger.
             ir_dc = self._rng.gauss(1_800, 500)
             heart_rate = self._rng.uniform(35, 180)
             spo2 = self._rng.uniform(70, 100)
@@ -86,7 +87,7 @@ class MockSensor(SensorInterface):
         elif fault == "warn_spo2":
             spo2 = self._rng.uniform(88.0, 91.0)
         elif fault == "ir_broken":
-            # قيمة فوق مدى ADC (18-بت): لا يمكن أن تأتي من الحسّاس نفسه.
+            # Above the 18-bit ADC range: cannot come from the sensor itself.
             ir_dc = self._rng.uniform(5e5, 9e6)
 
         elif fault == "still":
@@ -104,7 +105,7 @@ class MockSensor(SensorInterface):
         return sample
 
     def _movement(self) -> float:
-        """ضوضاء منخفضة مع نوبات حركة متفرّقة — مصدرها جهاز منفصل عن المسند."""
+        """Low noise with occasional bursts of movement — from a device separate from the armrest."""
         if self._rng.random() < 0.25:
             return self._rng.uniform(0.25, 0.9)
         return self._rng.uniform(0.0, 0.05)
@@ -112,26 +113,27 @@ class MockSensor(SensorInterface):
 
 def default_scenario() -> Dict[int, str]:
     """
-    سيناريو العرض: 120 عيّنة × 30 ث = ساعة افتراضية.
+    Demo scenario: 120 samples × 30 s = one virtual hour.
 
-    يمرّ على كل حالة يجب أن يمسكها المدقّق، وينتهي بخمول طويل
-    يتجاوز IMMOBILITY_LIMIT_S ليُطلق إنذار الحركة.
+    Passes through every state the validator must catch, and ends with a long
+    immobility stretch that exceeds IMMOBILITY_LIMIT_S to trigger the movement alert.
     """
     faults: Dict[int, str] = {}
-    for i in range(10, 14):          # رفع المعصم عن المسند
+    for i in range(10, 14):          # wrist lifted off the armrest
         faults[i] = "no_contact"
-    faults[16] = "artifact_hr"       # رعشة/حركة يد
-    faults[18] = "impossible_hr"     # قيمة مستحيلة
+    faults[16] = "artifact_hr"       # tremor / hand movement
+    faults[18] = "impossible_hr"     # impossible value
     faults[20] = "nan_spo2"
     faults[22] = "none_hr"
-    for i in range(24, 26):          # أكسجين منخفض لكنه ممكن ⇒ WARN
+    for i in range(24, 26):          # low but possible oxygen ⇒ WARN
         faults[i] = "warn_spo2"
-    # التجمّد يحتاج 10 عيّنات متطابقة قبل أن يُرصد، ثم 30 عيّنة أخرى بلا رقم صالح
-    # ليُطلق إنذار الصمت (15 دقيقة ÷ 30 ث) — فالنافذة 40 عيّنة، لا أقل.
-    for i in range(28, 68):          # حسّاس متجمّد ⇒ تجمّد ثم صمت قياس
+    # The stuck check needs 10 identical samples before it fires, then 30 more
+    # samples with no valid number to raise the silence alert (15 min ÷ 30 s) —
+    # so the window is 40 samples, no fewer.
+    for i in range(28, 68):          # frozen sensor ⇒ stuck, then measurement silence
         faults[i] = "frozen"
-    for i in range(69, 72):          # عطب في الناقل ⇒ إنذار صيانة
+    for i in range(69, 72):          # bus fault ⇒ maintenance alert
         faults[i] = "ir_broken"
-    for i in range(75, 115):         # سكون تام ⇒ إنذار الحركة (وطول الاستناد ⇒ إنذار المعصم)
+    for i in range(75, 115):         # completely still ⇒ movement alert (and long rest ⇒ wrist alert)
         faults[i] = "still"
     return faults
