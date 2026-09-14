@@ -1,0 +1,461 @@
+"""
+شاشة المستخدم — الراسم. يعرض **وصف display.py حرفيًا** ولا يقرّر شيئًا بنفسه.
+
+لماذا صفحة ويب محلية بدل نافذة سطح مكتب:
+  - Tk على ويندوز لا يصل الحروف العربية (تظهر منفصلة ومقلوبة) ⟵ شاشة مستخدم غير مقروءة.
+  - RTL وخط كبير وتباين عالٍ جاهزة ومضبوطة في الويب.
+  - الشكل الأقرب للمنتج الفعلي: تابلت مثبّت على الكرسي.
+  - stdlib فقط: لا مكتبة خارجية تُضاف للتسليم.
+
+المعمارية هنا:
+    MockSensor ⟵ Validator ⟵ AuditLogger ⟵ build_screen()  (خيط خلفي)
+                                    ↓ JSON
+                            الصفحة تسحب /state وترسم
+
+الصفحة لا ترى VitalSample الخام أبدًا؛ لا يعبر إليها إلا ما اجتاز المدقّق.
+
+التشغيل:  python screen.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, Optional
+
+from display import build_carer_screen, build_screen
+from exporter import MeasurementExporter
+from logger import AuditLogger
+from mock_sensor import MockSensor, default_scenario
+from validator import Validator
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  الحالة المشتركة بين خيط الحسّاس وخيوط الخدمة
+# ═══════════════════════════════════════════════════════════════════════════
+
+_state_lock = threading.Lock()
+_state: Dict[str, Any] = {"model": None, "carer": None}
+_stop = threading.Event()
+
+
+def _publish(model_dict: Optional[Dict[str, Any]],
+             carer_dict: Optional[Dict[str, Any]]) -> None:
+    with _state_lock:
+        _state["model"] = model_dict
+        _state["carer"] = carer_dict
+
+
+def _snapshot(key: str) -> Optional[Dict[str, Any]]:
+    with _state_lock:
+        return _state[key]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  خيط الحسّاس: نفس مسار demo.py بالضبط، بمعدّل زمن حقيقي قابل للضبط
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _sensor_loop(period_s: float, sample_period_s: float, seed: int,
+                 log_path: str, cycle_samples: int, csv_path: Optional[str],
+                 clean: bool = False) -> None:
+    """
+    الشاشة عرض مستمر، والسيناريو 90 عيّنة فقط. بعد نفادها تصير كل القراءات سليمة
+    للأبد ⟵ من يفتح الشاشة متأخرًا لا يرى أي حالة عرض. لذلك يُعاد تشغيل السيناريو
+    بذرة جديدة على **ساعة متصلة**، بلا تصفير المدقّق: الجلسة واحدة وذاكرتها متصلة،
+    والمتغيّر هو الأعطال المحقونة فقط.
+    """
+    validator = Validator()
+    audit = AuditLogger(path=log_path)
+    audit.log_session_start(validator)      # لقطة العتبات: قرار بلا عتبته لا يُدقَّق
+    export = MeasurementExporter(path=csv_path) if csv_path else None
+    if export:
+        export.write_meta(validator)
+
+    cycle = 0
+    sensor = MockSensor(seed=seed, sample_period_s=sample_period_s,
+                        faults={} if clean else default_scenario(), start_t=0.0)
+    sensor.start()
+    try:
+        while not _stop.is_set():
+            sample = sensor.read()
+            result = validator.validate(sample)
+            audit.log_result(sample, result)
+            if export:
+                export.write(result)
+            # الشاشتان تُبنيان من **نفس** ValidationResult في اللحظة نفسها،
+            # فلا يمكن أن تتناقضا ولا أن تتأخّر إحداهما عن الأخرى.
+            _publish(build_screen(result).to_dict(),
+                     build_carer_screen(result).to_dict())
+
+            if sensor.index >= cycle_samples - 1:
+                # الساعة تُستأنف من العيّنة التالية لا من نفس اللحظة،
+                # وإلا تكرّر طابع زمني واحد وارتبك حساب الخمول.
+                sensor.stop()
+                cycle += 1
+                sensor = MockSensor(seed=seed + cycle, sample_period_s=sample_period_s,
+                                    faults={} if clean else default_scenario(),
+                                    start_t=sample.t + sample_period_s)
+                sensor.start()
+
+            _stop.wait(period_s)
+    finally:
+        sensor.stop()
+        audit.close()
+        if export:
+            export.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  الصفحة
+# ═══════════════════════════════════════════════════════════════════════════
+
+# STALE_MS: إن انقطع مصدر الحالة، تُمسح الأرقام فورًا وتُعلن الشاشة انقطاعها.
+# شاشة تتجمّد على آخر رقم أخطر من شاشة فارغة — المستخدم يقرأها كقياس حيّ.
+PAGE = """<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>User Screen</title>
+<style>
+  :root {
+    --bg:#0A0E14; --tile:#151B24; --edge:#232C39;
+    --ink:#EAF0F7; --muted:#93A1B2;
+    --warn:#F0A93B; --warn-ink:#FFC96B;
+    --alert:#D32F2F; --blocked:#6E7A8A;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body {
+    background:var(--bg); color:var(--ink); min-height:100vh; padding:2vh 2vw;
+    font-family:"Segoe UI","Tahoma","Arial",sans-serif;
+    display:flex; flex-direction:column; gap:2vh;
+  }
+  header { display:flex; justify-content:space-between; align-items:baseline;
+           border-bottom:2px solid var(--edge); padding-bottom:1.2vh; }
+  h1 { font-size:clamp(18px,2.2vw,28px); font-weight:600; letter-spacing:.5px; }
+  #clock { font-size:clamp(18px,2.2vw,28px); color:var(--muted);
+           font-variant-numeric:tabular-nums; }
+
+  #banners { display:flex; flex-direction:column; gap:1.2vh; }
+  .banner { display:flex; align-items:center; gap:16px; border-radius:14px;
+            padding:2.2vh 2vw; font-size:clamp(24px,3.6vw,52px); font-weight:700; }
+  .banner .icon { font-size:1.25em; line-height:1; }
+  .banner.ALERT   { background:var(--alert); color:#fff; animation:pulse 1.1s infinite; }
+  .banner.BLOCKED { background:var(--tile); color:var(--ink); border:3px solid var(--edge); }
+  @keyframes pulse { 50% { opacity:.55; } }
+  @media (prefers-reduced-motion:reduce) { .banner.ALERT { animation:none; } }
+
+  #tiles { flex:1; display:grid; gap:2vh;
+           grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }
+  .tile { background:var(--tile); border:3px solid var(--edge); border-radius:18px;
+          padding:2.5vh 2vw; display:flex; flex-direction:column;
+          justify-content:center; gap:1.2vh; }
+  .tile.WARN { border-color:var(--warn); }
+  .label { font-size:clamp(18px,2.2vw,30px); color:var(--muted); font-weight:600; }
+  .value { font-size:clamp(58px,11vw,150px); font-weight:700; line-height:1;
+           font-variant-numeric:tabular-nums; }
+  .unit  { font-size:.32em; color:var(--muted); margin-inline-start:.15em; font-weight:600; }
+  .tile.WARN    .value { color:var(--warn-ink); }
+  .tile.BLOCKED .value { color:var(--blocked); }
+  .msg { display:flex; align-items:center; gap:10px;
+         font-size:clamp(17px,2vw,28px); font-weight:600; min-height:1.4em; }
+  .tile.WARN    .msg { color:var(--warn-ink); }
+  .tile.BLOCKED .msg { color:var(--muted); }
+
+  footer { display:flex; justify-content:flex-end; align-items:center;
+           gap:16px; color:var(--muted); font-size:clamp(13px,1.4vw,18px);
+           border-top:2px solid var(--edge); padding-top:1.2vh; }
+  #sound { background:var(--tile); color:var(--ink); border:2px solid var(--edge);
+           border-radius:10px; padding:10px 18px; font-size:inherit;
+           font-family:inherit; cursor:pointer; }
+  #sound[data-on="1"] { border-color:var(--warn); color:var(--warn-ink); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Vital Signs</h1>
+    <div id="clock">--:--</div>
+  </header>
+
+  <div id="banners" role="status" aria-live="assertive"></div>
+  <main id="tiles"></main>
+
+  <footer>
+    <button id="sound" data-on="0" type="button">🔇 Enable sound</button>
+  </footer>
+
+<script>
+const STALE_MS = 3000;      // بعدها تُعتبر الحالة منقطعة وتُمسح الأرقام
+const POLL_MS  = 250;
+let lastOk = 0, alerting = false, audio = null, lastBeep = 0;
+
+document.getElementById("sound").addEventListener("click", (e) => {
+  // المتصفّحات تمنع الصوت قبل تفاعل المستخدم — لذلك زرّ صريح.
+  audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+  audio.resume();
+  const on = e.currentTarget.dataset.on === "1" ? "0" : "1";
+  e.currentTarget.dataset.on = on;
+  e.currentTarget.textContent = on === "1" ? "🔔 Sound on" : "🔇 Enable sound";
+  if (on === "1") beep();
+});
+
+function beep() {
+  const btn = document.getElementById("sound");
+  if (!audio || btn.dataset.on !== "1") return;
+  const osc = audio.createOscillator(), gain = audio.createGain();
+  osc.frequency.value = 880; gain.gain.value = 0.12;
+  osc.connect(gain).connect(audio.destination);
+  osc.start(); osc.stop(audio.currentTime + 0.28);
+}
+
+function tile(t) {
+  const el = document.createElement("section");
+  el.className = "tile " + t.severity;
+  const value = t.value_text === null ? "—" : t.value_text;
+  const unit  = t.value_text === null || t.unit === "—"
+              ? "" : `<span class="unit">${t.unit}</span>`;
+  el.innerHTML =
+    `<div class="label">${t.label}</div>` +
+    `<div class="value">${value}${unit}</div>` +
+    `<div class="msg">${t.message ? `<span>${t.icon}</span><span>${t.message}</span>` : ""}</div>`;
+  return el;
+}
+
+function banner(b) {
+  const el = document.createElement("div");
+  el.className = "banner " + b.severity;
+  el.innerHTML = `<span class="icon">${b.icon}</span><span>${b.text}</span>`;
+  return el;
+}
+
+// الساعة تعرض الوقت الحقيقي للجهاز، لا زمن الجلسة الافتراضي.
+// مستقلّة عن وصول البيانات عمدًا: ساعة الحائط تبقى صحيحة ولو انقطع الحسّاس.
+function tickClock() {
+  const d = new Date();
+  document.getElementById("clock").textContent =
+    String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+tickClock(); setInterval(tickClock, 1000);
+
+function draw(model) {
+  const tilesEl = document.getElementById("tiles");
+  tilesEl.replaceChildren(...model.tiles.map(tile));
+  const bannersEl = document.getElementById("banners");
+  bannersEl.replaceChildren(...model.banners.map(banner));
+
+  // إعادة التنبيه كل 8 ث ما دام الإنذار قائمًا — نداء واحد قد يفوت المستخدم.
+  const now = Date.now();
+  if (model.needs_sound) {
+    if (!alerting || now - lastBeep > 8000) { beep(); lastBeep = now; }
+    alerting = true;
+  } else { alerting = false; }
+}
+
+function drawDisconnected() {
+  // انقطع المصدر: لا رقم يبقى معروضًا. شاشة متجمّدة تُقرأ كقياس حيّ.
+  document.getElementById("banners").replaceChildren(banner(
+    { severity:"BLOCKED", icon:"⛔", text:"Connection lost — no readings" }));
+  document.querySelectorAll(".tile").forEach(el => {
+    el.className = "tile BLOCKED";
+    el.querySelector(".value").textContent = "—";
+    el.querySelector(".msg").innerHTML = "<span>⛔</span><span>Reading unavailable</span>";
+  });
+}
+
+async function poll() {
+  try {
+    const res = await fetch("/state", { cache:"no-store" });
+    const data = await res.json();
+    if (data.model) { draw(data.model); lastOk = Date.now(); }
+  } catch (e) { /* يعالَج أدناه بمنطق التقادم */ }
+  if (Date.now() - lastOk > STALE_MS) drawDisconnected();
+}
+lastOk = Date.now();
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>
+"""
+
+
+# شاشة المرافق: ملخّص "ما يستدعي التدخّل"، لا نسخة ثانية من شاشة المستخدم.
+# المرافق قد يكون في غرفة أخرى، فالمطلوب حالة واحدة واضحة من بعيد + منذ متى.
+CARER_PAGE = """<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caregiver Screen</title>
+<style>
+  :root { --bg:#0A0E14; --card:#151B24; --edge:#232C39; --ink:#EAF0F7;
+          --muted:#93A1B2; --ok:#3FA96A; --warn:#F0A93B; --alert:#D32F2F; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--ink); min-height:100vh; padding:2vh 3vw;
+         font-family:"Segoe UI","Tahoma","Arial",sans-serif;
+         display:flex; flex-direction:column; gap:2vh; }
+  header { display:flex; justify-content:space-between; align-items:baseline;
+           border-bottom:2px solid var(--edge); padding-bottom:1vh; }
+  h1 { font-size:clamp(17px,2vw,26px); font-weight:600; }
+  #clock { color:var(--muted); font-variant-numeric:tabular-nums;
+           font-size:clamp(16px,1.8vw,22px); }
+  #status { border-radius:16px; padding:3vh 2vw; text-align:center;
+            font-size:clamp(26px,4vw,54px); font-weight:700; }
+  #status.ok    { background:var(--card); border:3px solid var(--ok); color:var(--ok); }
+  #status.busy  { background:var(--alert); color:#fff; }
+  #status.dark  { background:var(--card); border:3px solid var(--warn); color:var(--warn); }
+  .group { display:flex; flex-direction:column; gap:1vh; }
+  .group h2 { font-size:clamp(15px,1.6vw,20px); color:var(--muted); font-weight:600; }
+  /* الحدّ السميك بخاصية منطقية لا يمين/يسار — يعمل صحيحًا في LTR وRTL معًا. */
+  .row { background:var(--card); border:2px solid var(--edge); border-inline-start-width:8px;
+         border-radius:12px; padding:1.6vh 1.4vw; display:flex; justify-content:space-between;
+         align-items:center; gap:14px; font-size:clamp(16px,1.9vw,26px); }
+  .row.alert { border-inline-start-color:var(--alert); }
+  .row.warn  { border-inline-start-color:var(--warn); }
+  .row.blocked { border-inline-start-color:var(--muted); color:var(--muted); }
+  .row .since { color:var(--muted); font-size:.8em; font-variant-numeric:tabular-nums; }
+  .val { font-weight:700; font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+  <header><h1>Caregiver Monitor</h1><div id="clock">--:--</div></header>
+  <div id="status" class="ok" role="status" aria-live="assertive">—</div>
+  <div id="groups" class="group"></div>
+<script>
+const STALE_MS = 4000; let lastOk = Date.now();
+
+function row(cls, label, value, since) {
+  const el = document.createElement("div");
+  el.className = "row " + cls;
+  el.innerHTML = `<span>${label}</span><span class="val">${value}</span>` +
+                 (since ? `<span class="since">${since}</span>` : "");
+  return el;
+}
+function mmss(s) {
+  s = Math.max(0, Math.round(s));
+  return String(Math.floor(s / 60)).padStart(2, "0") + ":" +
+         String(s % 60).padStart(2, "0");
+}
+// الوقت الحقيقي للجهاز — مستقلّ عن وصول البيانات (انظر شاشة المستخدم).
+function tickClock() {
+  const d = new Date();
+  document.getElementById("clock").textContent =
+    String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+tickClock(); setInterval(tickClock, 1000);
+
+function draw(m) {
+  const status = document.getElementById("status");
+  // ثلاث حالات لا اثنتان: "لا يوجد ما يستدعي التدخّل" بينما لا يصل رقم = طمأنة كاذبة.
+  if (m.attention)        { status.className = "busy"; status.textContent = "Needs your attention"; }
+  else if (!m.monitoring) { status.className = "dark"; status.textContent = "No readings right now"; }
+  else                    { status.className = "ok";   status.textContent = "Nothing needs attention"; }
+
+  const g = document.getElementById("groups");
+  g.replaceChildren();
+  m.alerts.forEach(a => g.appendChild(row("alert", a.icon + " " + a.text, "",
+    a.kind === "movement" ? "for " + mmss(m.immobility_s) :
+    a.kind === "lift_wrist" ? "for " + mmss(m.wrist_rest_s) :
+    a.kind === "silent" ? "for " + mmss(m.silence_s) : "")));
+  m.abnormal.forEach(t => g.appendChild(row("warn",
+    t.icon + " " + t.label, t.value_text + " " + t.unit, t.message)));
+  m.blocked.forEach(t => g.appendChild(row("blocked", t.label, "—", t.message)));
+  m.normal.forEach(t => g.appendChild(row("", t.label, t.value_text + " " + t.unit, "")));
+}
+function disconnected() {
+  const status = document.getElementById("status");
+  status.className = "busy";
+  status.textContent = "⛔ Connection lost — monitoring stopped";
+  document.getElementById("groups").replaceChildren();
+}
+async function poll() {
+  try {
+    const d = await (await fetch("/state/carer", { cache:"no-store" })).json();
+    if (d.model) { draw(d.model); lastOk = Date.now(); }
+  } catch (e) {}
+  if (Date.now() - lastOk > STALE_MS) disconnected();
+}
+poll(); setInterval(poll, 400);
+</script>
+</body>
+</html>
+"""
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802  (توقيع مفروض من المكتبة)
+        if self.path.startswith("/state/carer"):
+            body = json.dumps({"model": _snapshot("carer")},
+                              ensure_ascii=False).encode("utf-8")
+            self._send(body, "application/json; charset=utf-8")
+        elif self.path.startswith("/state"):
+            body = json.dumps({"model": _snapshot("model")},
+                              ensure_ascii=False).encode("utf-8")
+            self._send(body, "application/json; charset=utf-8")
+        elif self.path in ("/", "/index.html"):
+            self._send(PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        elif self.path.rstrip("/") == "/family":
+            self._send(CARER_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        else:
+            self.send_error(404)
+
+    def _send(self, body: bytes, content_type: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: Any) -> None:
+        """صمت: سجلّ HTTP ضجيج يخفي مخرجات التشخيص."""
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="شاشة المستخدم (بروتوتايب)")
+    parser.add_argument("--port", type=int, default=8770)
+    parser.add_argument("--period", type=float, default=0.5,
+                        help="ثوانٍ حقيقية بين العيّنتين على الشاشة")
+    parser.add_argument("--sample-period", type=float, default=30.0,
+                        help="ثوانٍ افتراضية بين العيّنتين (ساعة الحسّاس)")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--log", default="audit_log.jsonl")
+    parser.add_argument("--csv", default=None,
+                        help="مسار تصدير القياسات (بلا هذا الخيار لا يُكتب ملف بيانات)")
+    parser.add_argument("--cycle-samples", type=int, default=120,
+                        help="طول دورة السيناريو قبل إعادة حقن الأعطال")
+    parser.add_argument("--clean", action="store_true",
+                        help="تشغيل بلا حقن أعطال — قراءات سليمة متصلة (للعرض)")
+    parser.add_argument("--no-browser", action="store_true")
+    args = parser.parse_args()
+
+    worker = threading.Thread(
+        target=_sensor_loop,
+        args=(args.period, args.sample_period, args.seed, args.log,
+              args.cycle_samples, args.csv, args.clean),
+        daemon=True,
+    )
+    worker.start()
+
+    url = f"http://127.0.0.1:{args.port}/"
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), _Handler)
+    print(f"User screen      ⟵ {url}")
+    print(f"Caregiver screen ⟵ {url}family    (Ctrl+C to stop)")
+    # عند --period 0.5 و30 ث/عيّنة: حدّ الخمول (20 دقيقة) يُبلَغ خلال ~20 ثانية حقيقية.
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _stop.set()
+        server.server_close()
+        worker.join(timeout=2.0)
+        print("\nScreen stopped.")
+
+
+if __name__ == "__main__":
+    main()
