@@ -3,7 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-.claude/
 
 # Files produced by running — session data, not source.
 # A test-session log must never be delivered as if it were a real measurement log.

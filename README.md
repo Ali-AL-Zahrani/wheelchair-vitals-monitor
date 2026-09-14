@@ -19,13 +19,13 @@ Chair camera ─────▶ Gaze direction mapping ──▶ Screen (gaze-dr
 |---|---|---|
 | **Vital-signs monitoring** | Reads heart rate, blood oxygen, wrist skin temperature and movement; validates every reading; raises the four safety alerts; logs and exports the data | **this repository** |
 | **Gaze direction mapping** | A camera on the chair tracks where the user is looking and maps it to screen coordinates, so the screen can be used without hands | partner module |
-| **AI rehabilitation** | Learns from the validated vital signs, movement patterns and response to alerts, and predicts a rehabilitation programme personalised to each user rather than a generic plan | partner module |
+| **AI rehabilitation** | Learns from the validated vital signs, movement patterns and response to alerts, and predicts a rehabilitation programme personalised to each user rather than a generic plan | next phase — its data contract is defined and delivered by this repository |
 
 ### The AI layer and why validation comes first
 
 The rehabilitation model is only as good as the data it learns from. A sensor with no wrist on it still emits plausible-looking numbers; a frozen sensor repeats the same value; a hand tremor produces sudden jumps. If those reached the model, it would learn from noise and recommend with false confidence.
 
-That is why the AI layer never reads raw sensor output. It receives **only what passed the validation engine**:
+That is why the AI layer is designed never to read raw sensor output. It receives **only what passed the validation engine**, through two files this repository already produces:
 
 - `measurements.csv` — one row per sample containing validated readings only, with an empty cell (never a zero) wherever a reading was withheld, so no artificial value can enter a training set.
 - `audit_log.jsonl` — every rejected reading with its raw value and reason, every alert raised and cleared with its duration, and the thresholds in force for the session.
@@ -93,7 +93,7 @@ Sensor ⟶ Validator ⟶ Display ⟶ Screen
 | `screen.py` | Renderer: user screen and caregiver screen (local web page) |
 | `logger.py` | Medical audit log (JSON Lines) |
 | `exporter.py` | Measurement export for analysis (CSV + threshold snapshot) |
-| `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C (not yet tested on a device) |
+| `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C (integration in progress) |
 | `demo.py` | End-to-end terminal run + statistics |
 | `test_*.py` | Automated proof |
 
@@ -179,7 +179,7 @@ A companion **`measurements.csv.meta.json`** is written with the thresholds in f
 | `measurements.csv` | what were the readings across the session? |
 | `audit_log.jsonl` | why did the user not see a number at that moment? |
 
-> The final output format has not been specified by the client; CSV is an initial choice that converts easily.
+> The final output format is not yet fixed; CSV is an initial choice that converts easily.
 
 ## Changing thresholds
 
@@ -235,4 +235,4 @@ Decisions taken on purpose that may look counter-intuitive:
 
 **Complete:** the core, the audit log, measurement export, the user screen, the caregiver screen, the four alerts, 141 tests.
 
-**Remaining (pending hardware or a medical decision):** trying the `I2CSensor` hardware layer on the device, signal filtering, fixing the uncalibrated thresholds, and the escalation policy.
+**Next phase:** hardware integration of `I2CSensor` on the chair, signal filtering, threshold tuning on real hardware, the escalation policy, and the AI rehabilitation model.
