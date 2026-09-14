@@ -19,7 +19,7 @@ Chair camera ─────▶ Gaze direction mapping ──▶ Screen (gaze-dr
 |---|---|---|
 | **Vital-signs monitoring** | Reads heart rate, blood oxygen, wrist skin temperature and movement; validates every reading; raises the four safety alerts; logs and exports the data | **this repository** |
 | **Gaze direction mapping** | A camera on the chair tracks where the user is looking and maps it to screen coordinates, so the screen can be used without hands | partner module |
-| **AI rehabilitation** | Learns from the validated vital signs, movement patterns and response to alerts, and predicts a rehabilitation programme personalised to each user rather than a generic plan | next phase — its data contract is defined and delivered by this repository |
+| **AI rehabilitation** | Learns from the validated vital signs, movement patterns and response to alerts, and predicts a rehabilitation programme personalised to each user rather than a generic plan | this repository — in development |
 
 ### The AI layer and why validation comes first
 
