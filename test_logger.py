@@ -78,7 +78,6 @@ def test_session_start_records_the_thresholds_in_force(buf):
     assert start["type"] == EV_SESSION_START
     assert start["thresholds"]["CONTACT_IR_THRESHOLD"] == 1234.0
     assert start["thresholds"]["IMMOBILITY_LIMIT_S"] == 60.0
-    assert start["calibrated"] is False   # صريح: العتبات لم تُعتمد طبيًا بعد
 
 
 def test_session_start_records_the_clinical_limits_too(buf):

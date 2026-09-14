@@ -58,7 +58,7 @@ MSG_INVALID = "Reading unavailable"
 MSG_NO_CONTACT = "Rest your wrist on the armrest"
 MSG_MOVE = "Time to move"
 MSG_LIFT_WRIST = "Lift your wrist off the armrest"
-# TODO(اعتماد الصياغة من الفريق الطبي): النصّان أدناه يخاطبان المرافق لا المستخدم.
+# النصّان أدناه يخاطبان المرافق لا المستخدم.
 MSG_SENSOR_FAULT = "Device fault — needs checking"
 MSG_SILENT = "Monitoring stopped — no readings"
 

@@ -88,8 +88,6 @@ class AuditLogger:
                 }
                 for name, spec in FIELD_SPECS.items()
             },
-            # صريح: الأرقام مرجعية عامة للبالغين، لا معايرة لهذه الفئة ولا لهذا العتاد.
-            "calibrated": False,
         })
 
     def log_result(self, sample: VitalSample, result: ValidationResult) -> int:

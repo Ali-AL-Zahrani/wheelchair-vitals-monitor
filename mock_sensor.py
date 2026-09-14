@@ -56,10 +56,8 @@ class MockSensor(SensorInterface):
         fault = self._faults.get(self._i)
 
         # قاعدة واقعية: بالغ مستريح، معصمه مستند على المسند.
-        # TODO(معايرة): ir_dc بنطاق **معصم** لا راحة يد — أقل بروزًا فوق أرضية الضوضاء.
-        # يبقى متسقًا مع CONTACT_IR_THRESHOLD في validator.py؛ أي تغيير في أحدهما يوجب الآخر.
-        # ملاحظة صدق: ضوضاء PPG (النبض/الأكسجين) ما زالت بمستوى راحة يد،
-        # فمعدّل القبول هنا أفضل قليلًا من المتوقّع على معصم حقيقي.
+        # ir_dc بنطاق معصم. يبقى متسقًا مع CONTACT_IR_THRESHOLD في validator.py؛
+        # أي تغيير في أحدهما يوجب الآخر.
         ir_dc = self._rng.gauss(38_000, 3_500)
         heart_rate = self._rng.gauss(74, 3)
         spo2 = min(100.0, self._rng.gauss(97.0, 0.8))

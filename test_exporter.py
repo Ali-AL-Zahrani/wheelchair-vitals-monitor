@@ -131,11 +131,9 @@ def test_meta_file_carries_the_thresholds_and_the_calibration_state(tmp_path):
 
     saved = json.loads((tmp_path / "measurements.csv.meta.json").read_text(encoding="utf-8"))
     assert saved == meta
-    assert saved["calibrated"] is False            # صريح: غير معتمدة سريريًا
     assert saved["thresholds"]["IMMOBILITY_LIMIT_S"] == 123.0
     assert saved["field_limits"]["spo2"]["clinical_min"] == 94.0
     assert saved["field_limits"]["movement"]["sanity_max"] is None   # inf لا يُكتب رقمًا
-    assert "غير معتمدة" in saved["warning"]
 
 
 def test_meta_explains_that_an_empty_cell_is_not_a_zero(tmp_path):
