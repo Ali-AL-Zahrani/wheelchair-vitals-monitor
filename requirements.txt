@@ -1,6 +1,10 @@
-# The simulation and both screens need no external library — stdlib only (Python 3.8+).
-# The package below is for the tests only.
+# The simulation, both screens and the validator need no external library —
+# stdlib only (Python 3.8+). The packages below are for the tests and the AI layer.
 pytest>=7.0
+
+# Rehabilitation model (rehab_model.py, generate_training_data.py) only.
+# Monitoring, validation and the screens keep running without it.
+scikit-learn>=1.0
 
 # For real hardware on a Raspberry Pi (i2c_sensor.py) — not needed for the simulation:
 # smbus2>=0.4

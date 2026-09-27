@@ -25,12 +25,14 @@ Chair camera ─────▶ Gaze direction mapping ──▶ Screen (gaze-dr
 
 The rehabilitation model is only as good as the data it learns from. A sensor with no wrist on it still emits plausible-looking numbers; a frozen sensor repeats the same value; a hand tremor produces sudden jumps. If those reached the model, it would learn from noise and recommend with false confidence.
 
-That is why the AI layer is designed never to read raw sensor output. It receives **only what passed the validation engine**, through two files this repository already produces:
+That is why the AI layer never reads raw sensor output. It receives **only what passed the validation engine**, through the two files this repository produces:
 
 - `measurements.csv` — one row per sample containing validated readings only, with an empty cell (never a zero) wherever a reading was withheld, so no artificial value can enter a training set.
 - `audit_log.jsonl` — every rejected reading with its raw value and reason, every alert raised and cleared with its duration, and the thresholds in force for the session.
 
-From these the model has what it needs to personalise: the user's own resting baselines, how long they stay immobile and how quickly they respond to a movement prompt, how often the wrist-pressure reminder fires, and how the readings trend across sessions. Because every row carries the threshold snapshot that produced it, the model can also be retrained correctly when thresholds are tuned on real hardware.
+From these the model has what it needs to personalise: the user's own resting baselines, how long they stay immobile and how quickly they respond to a movement prompt, how often the wrist-pressure reminder fires, and how much of the session the validator withheld. Because every session carries the threshold snapshot that produced it, the model can also be retrained correctly when thresholds are tuned on real hardware.
+
+It is built and tested — see **[Rehabilitation model](#rehabilitation-model-the-ai-layer)** below.
 
 The three components share the armrest screen: validated readings and alerts are displayed there, and gaze mapping lets the user interact with it.
 
@@ -67,10 +69,15 @@ Both screens on a local server:
 At `--period 0.5` the virtual hour completes in one real minute, so every display state and alert appears in sequence, then the cycle repeats.
 
 ```bash
+python generate_training_data.py
+```
+Builds the training population for the rehabilitation model, fits it, reports held-out accuracy and the indicators it relies on, and saves the model. Needs `pip install scikit-learn`.
+
+```bash
 python -m pytest -q
 ```
-**141 tests.** Each one guards a medical decision, not a programming detail.
-(`pip install -r requirements.txt` — running the system itself needs no external libraries.)
+**175 tests.** Each one guards a medical decision, not a programming detail.
+(`pip install -r requirements.txt` — running the monitoring system itself needs no external libraries.)
 
 ---
 
@@ -79,7 +86,7 @@ python -m pytest -q
 ```
 Sensor ⟶ Validator ⟶ Display ⟶ Screen
               ↓
-           Logger
+           Logger ⟶ Exporter ⟶ Features ⟶ Rehabilitation model
 ```
 
 **Fixed safety rule:** the screen reads from **validator output only**. No raw, unverified number reaches the user's eyes — no exceptions.
@@ -94,6 +101,9 @@ Sensor ⟶ Validator ⟶ Display ⟶ Screen
 | `logger.py` | Medical audit log (JSON Lines) |
 | `exporter.py` | Measurement export for analysis (CSV + threshold snapshot) |
 | `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C (integration in progress) |
+| `rehab_features.py` | One session ⟶ the thirteen indicators the model reads |
+| `rehab_model.py` | **The AI layer:** clinical criteria + the classifier that recommends a programme |
+| `generate_training_data.py` | The simulated training population and the training run |
 | `demo.py` | End-to-end terminal run + statistics |
 | `test_*.py` | Automated proof |
 
@@ -181,6 +191,64 @@ A companion **`measurements.csv.meta.json`** is written with the thresholds in f
 
 > The final output format is not yet fixed; CSV is an initial choice that converts easily.
 
+## Rehabilitation model (the AI layer)
+
+Predicts **the rehabilitation programme that fits this user**, instead of one generic plan for everyone — and says why it chose it.
+
+**Type:** supervised classification. **Algorithm:** random forest (`scikit-learn`). Chosen for two reasons that matter more here than raw accuracy: it works with the small number of users a prototype can gather, and it can be questioned — every recommendation comes back with the indicators that drove it, so a clinician can agree or disagree with the reasoning instead of with a bare label.
+
+**The model recommends; it does not decide.** The output is a recommendation for review by the medical team or the caregiver, never an instruction to the user.
+
+### Input — thirteen indicators, all from validated data
+
+`rehab_features.py` reduces a whole session to one vector. It reads `measurements.csv` and `audit_log.jsonl`, never a sensor.
+
+| Group | Indicators |
+|---|---|
+| **Own baseline** | resting heart rate and its steadiness, average and lowest blood oxygen, wrist skin temperature |
+| **Activity** | average movement, longest immobile stretch, movement prompts per hour, how long a prompt stayed up before the user moved |
+| **Signal quality** | share of readings accepted, share outside the clinical range, share of the session withheld, wrist-pressure prompts per hour |
+
+Two rules are enforced in code and tested:
+
+- **An empty cell is never read as a zero.** Two readings of 70 and 80 with eight withheld samples between them average to 75, not to 15.
+- **An indicator that could not be measured is filled from a neutral population value, not with 0** — zero is an extreme value to a decision tree, so it would be read as a finding rather than as missing data. `no_reading_ratio` is itself an indicator, so the model can see that a session was sparse.
+
+### Output
+
+```
+Moderate programme (83% confidence) — longest immobile stretch 31 min — above typical;
+response to a movement prompt 9.4 min — above typical; readings outside the clinical range 12% — above typical
+```
+
+The reasons are the indicators that stood out for this user among the ones the forest actually relies on: distance from the training median, weighted by the indicator's importance. An indicator the forest ignores never appears as a reason, however unusual its value.
+
+### Clinical criteria — one table, meant to be replaced
+
+`PROTOCOL_RULES` in `rehab_model.py` holds the criteria as data: each rule adds points, and the bands map points to a programme. Changing the protocol is editing that table, not rewriting logic. `PROGRAMS` holds the closed list of programmes — three provisional levels until the medical team supplies their own.
+
+| Programme | Fits |
+|---|---|
+| **Light** | Stable readings and regular movement |
+| **Moderate** | Long immobile stretches or a slow response to prompts |
+| **Intensive** | Repeatedly abnormal readings or prolonged immobility |
+
+### Training data
+
+No real sessions exist yet, so the first population is simulated: users with different baselines, activity levels and signal quality, each run through the **real** pipeline — sensor ⟶ validator ⟶ exporter and audit log — then reduced to features by the same code that will read a real session. Nothing bypasses the validator, so a simulated user's withheld readings are withheld exactly as a real user's would be.
+
+```
+400 sessions of two virtual hours each
+  LIGHT 48%   MODERATE 27%   INTENSIVE 25%
+Held-out accuracy: 92%
+Indicators the model relies on most: longest immobile stretch, response time,
+average movement, share of readings outside the clinical range
+```
+
+The criteria table is also how that first set is labelled, because no clinician labels exist yet. That has a consequence worth stating plainly: on simulated data the forest largely learns the rule table back. What it adds is tolerance — it still classifies a user whose indicators sit between two bands, or whose session was partly withheld by the validator, instead of falling off a hard threshold. Once real sessions carry clinician-assigned programmes, the same model is refitted on those labels and the rule table becomes the fallback only.
+
+---
+
 ## Changing thresholds
 
 Every threshold lives in `validator.py` **and is duplicated nowhere else**:
@@ -233,6 +301,6 @@ Decisions taken on purpose that may look counter-intuitive:
 
 ## Status and what remains
 
-**Complete:** the core, the audit log, measurement export, the user screen, the caregiver screen, the four alerts, 141 tests.
+**Complete:** the core, the audit log, measurement export, the user screen, the caregiver screen, the four alerts, the rehabilitation model, 175 tests.
 
-**Next phase:** hardware integration of `I2CSensor` on the chair, signal filtering, threshold tuning on real hardware, the escalation policy, and the AI rehabilitation model.
+**Next phase:** hardware integration of `I2CSensor` on the chair, signal filtering, threshold tuning on real hardware, the escalation policy, the real programme list and criteria from the medical team, and refitting the model on real sessions.
