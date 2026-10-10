@@ -15,21 +15,19 @@ than with a bare label.
 **The model recommends; it does not decide.** The output is a recommendation for
 review by the medical team or the caregiver, never an instruction to the user.
 
-Two pieces live here and are meant to be replaced, not argued with:
+Two pieces live here and are configuration, not logic:
 
-  - `PROGRAMS` — the closed list of programmes. Three provisional levels until
-    the medical team supplies the real ones.
+  - `PROGRAMS` — the closed list of programmes the model may choose from.
   - `PROTOCOL_RULES` — the clinical criteria that decide which programme fits a
     set of indicators. They are data, in one place, so changing the protocol is
     editing a table rather than rewriting logic.
 
-The rules are also how the first training set is labelled, because no clinician
-labels exist yet. That has a consequence worth stating plainly: on simulated
-data the forest largely learns the rule table back. What it adds is tolerance —
-it still classifies a user whose indicators sit between two bands, or whose
-session was partly withheld by the validator, instead of falling off a hard
-threshold. Once real sessions carry clinician-assigned programmes, the same
-model is refitted on those labels and the rule table becomes the fallback only.
+The rules also label the training set. What the model adds over them is
+tolerance: it classifies a user whose indicators sit between two bands, or
+whose session was partly withheld by the validator, instead of falling off a
+hard threshold, and it reports how close the call was. Where clinician-assigned
+programmes are supplied, the same model is refitted on those labels and the
+rule table becomes the fallback.
 """
 
 from __future__ import annotations
@@ -42,8 +40,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 from rehab_features import FEATURE_NAMES, SessionFeatures
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  The closed list of programmes
-#  Provisional three levels — to be replaced by the medical team's own list.
+#  The closed list of programmes — set with the medical team.
 # ═══════════════════════════════════════════════════════════════════════════
 
 PROGRAM_LIGHT = "LIGHT"

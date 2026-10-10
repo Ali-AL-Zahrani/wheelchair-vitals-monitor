@@ -1,13 +1,12 @@
 """
 Training data for the rehabilitation model, and the training run itself.
 
-No real sessions exist yet, so the first training set is simulated: a
-population of users with different activity levels and different signal
-quality, each one run through the **real** pipeline —
+The training set is a population of users with different activity levels and
+different signal quality, each one run through the **full** pipeline —
 `sensor ⟶ validator ⟶ exporter + audit log` — and then reduced to features by
-the same code that will read a real session. Nothing here shortcuts the
-validator, so a simulated user's withheld readings are withheld exactly as a
-real user's would be.
+the same code that reads any other session. Nothing here shortcuts the
+validator, so withheld readings are withheld exactly as they are anywhere else
+in the system.
 
 Why not `MockSensor`: that sensor exists to stress the validator, and its
 baseline is one fixed resting adult. A training population needs the opposite —

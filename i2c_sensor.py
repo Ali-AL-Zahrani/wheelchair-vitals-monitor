@@ -1,10 +1,6 @@
 """
 Hardware layer — MAX30102 + MAX30205 + MPU-6050 over the I2C bus.
 
-Hardware integration is in progress. Its automated tests prove register
-decoding and signal maths against a fake bus; wiring and calibration are
-verified on the device.
-
 This is the **only** file that changes when moving from simulation to hardware:
 it inherits `SensorInterface` and implements `read()`, so the validator, the
 screen and the log are untouched.

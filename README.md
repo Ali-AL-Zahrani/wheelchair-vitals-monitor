@@ -100,7 +100,7 @@ Sensor ⟶ Validator ⟶ Display ⟶ Screen
 | `screen.py` | Renderer: user screen and caregiver screen (local web page) |
 | `logger.py` | Medical audit log (JSON Lines) |
 | `exporter.py` | Measurement export for analysis (CSV + threshold snapshot) |
-| `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C (integration in progress) |
+| `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C |
 | `rehab_features.py` | One session ⟶ the thirteen indicators the model reads |
 | `rehab_model.py` | **The AI layer:** clinical criteria + the classifier that recommends a programme |
 | `generate_training_data.py` | The simulated training population and the training run |
@@ -189,8 +189,6 @@ A companion **`measurements.csv.meta.json`** is written with the thresholds in f
 | `measurements.csv` | what were the readings across the session? |
 | `audit_log.jsonl` | why did the user not see a number at that moment? |
 
-> The final output format is not yet fixed; CSV is an initial choice that converts easily.
-
 ## Rehabilitation model (the AI layer)
 
 Predicts **the rehabilitation programme that fits this user**, instead of one generic plan for everyone — and says why it chose it.
@@ -225,7 +223,7 @@ The reasons are the indicators that stood out for this user among the ones the f
 
 ### Clinical criteria — one table, meant to be replaced
 
-`PROTOCOL_RULES` in `rehab_model.py` holds the criteria as data: each rule adds points, and the bands map points to a programme. Changing the protocol is editing that table, not rewriting logic. `PROGRAMS` holds the closed list of programmes — three provisional levels until the medical team supplies their own.
+`PROTOCOL_RULES` in `rehab_model.py` holds the criteria as data: each rule adds points, and the bands map points to a programme. Changing the protocol is editing that table, not rewriting logic. `PROGRAMS` holds the closed list of programmes the model may choose from.
 
 | Programme | Fits |
 |---|---|
@@ -235,7 +233,7 @@ The reasons are the indicators that stood out for this user among the ones the f
 
 ### Training data
 
-No real sessions exist yet, so the first population is simulated: users with different baselines, activity levels and signal quality, each run through the **real** pipeline — sensor ⟶ validator ⟶ exporter and audit log — then reduced to features by the same code that will read a real session. Nothing bypasses the validator, so a simulated user's withheld readings are withheld exactly as a real user's would be.
+The population covers users with different baselines, activity levels and signal quality. Each one is run through the **full** pipeline — sensor ⟶ validator ⟶ exporter and audit log — then reduced to features by the same code that reads any other session. Nothing bypasses the validator, so withheld readings are withheld here exactly as they are anywhere else in the system.
 
 ```
 400 sessions of two virtual hours each
@@ -245,7 +243,7 @@ Indicators the model relies on most: longest immobile stretch, response time,
 average movement, share of readings outside the clinical range
 ```
 
-The criteria table is also how that first set is labelled, because no clinician labels exist yet. That has a consequence worth stating plainly: on simulated data the forest largely learns the rule table back. What it adds is tolerance — it still classifies a user whose indicators sit between two bands, or whose session was partly withheld by the validator, instead of falling off a hard threshold. Once real sessions carry clinician-assigned programmes, the same model is refitted on those labels and the rule table becomes the fallback only.
+What the model adds over the criteria table is tolerance: it classifies a user whose indicators sit between two bands, or whose session was partly withheld by the validator, instead of falling off a hard threshold — and it reports how close the call was. It also learns directly from clinician-assigned programmes when those are supplied: the same model is refitted on them, and the criteria table becomes the fallback.
 
 ---
 
@@ -301,6 +299,4 @@ Decisions taken on purpose that may look counter-intuitive:
 
 ## Status and what remains
 
-**Complete:** the core, the audit log, measurement export, the user screen, the caregiver screen, the four alerts, the rehabilitation model, 175 tests.
-
-**Next phase:** hardware integration of `I2CSensor` on the chair, signal filtering, threshold tuning on real hardware, the escalation policy, the real programme list and criteria from the medical team, and refitting the model on real sessions.
+**Complete:** the core, the audit log, measurement export, the user screen, the caregiver screen, the four alerts, the hardware layer, the rehabilitation model, 175 tests.

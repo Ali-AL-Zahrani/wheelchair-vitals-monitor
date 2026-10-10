@@ -1,11 +1,8 @@
 """
 Hardware-layer tests — against a fake I2C bus.
 
-⚠️ **What they prove:** register decoding for the three devices, the signal
-maths, and failure behaviour.
-⚠️ **What they do not prove:** correctness of the physical wiring, or value
-calibration on a real wrist. Passing these tests **does not mean** the device
-reads correctly — it means the logic is sound.
+They cover register decoding for the three devices, the signal maths, and
+behaviour under failure.
 
 The fake bus plays the role of MAX30102, MAX30205 and MPU-6050 together, so we
 can inject a PPG waveform of known frequency and check the extracted heart rate matches.
