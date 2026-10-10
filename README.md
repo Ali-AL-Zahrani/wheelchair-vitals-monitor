@@ -211,7 +211,7 @@ Predicts **the rehabilitation programme that fits this user**, instead of one ge
 |---|---|
 | **Own baseline** | resting heart rate and its steadiness, average and lowest blood oxygen, wrist skin temperature |
 | **Activity** | average movement, longest immobile stretch, movement prompts per hour, how long a prompt stayed up before the user moved |
-| **Signal quality** | share of readings accepted, share outside the clinical range, share of the session withheld, wrist-pressure prompts per hour |
+| **Signal quality** | share of readings normal, share abnormal (real but outside the clinical range), share withheld, wrist-pressure prompts per hour |
 
 Two rules are enforced in code and tested:
 
@@ -222,7 +222,7 @@ Two rules are enforced in code and tested:
 
 ```
 Moderate programme (83% confidence) — longest immobile stretch 31 min — above typical;
-response to a movement prompt 9.4 min — above typical; readings outside the clinical range 12% — above typical
+response to a movement prompt 9.4 min — above typical; abnormal readings 12% — above typical
 ```
 
 The reasons are the indicators that stood out for this user among the ones the forest actually relies on: distance from the training median, weighted by the indicator's importance. An indicator the forest ignores never appears as a reason, however unusual its value.
@@ -246,7 +246,7 @@ The population covers users with different baselines, activity levels and signal
   LIGHT 48%   MODERATE 27%   INTENSIVE 25%
 Held-out accuracy: 92%
 Indicators the model relies on most: longest immobile stretch, response time,
-average movement, share of readings outside the clinical range
+average movement, share of abnormal readings
 ```
 
 What the model adds over the criteria table is tolerance: it classifies a user whose indicators sit between two bands, or whose session was partly withheld by the validator, instead of falling off a hard threshold — and it reports how close the call was. It also learns directly from clinician-assigned programmes when those are supplied: the same model is refitted on them, and the criteria table becomes the fallback.

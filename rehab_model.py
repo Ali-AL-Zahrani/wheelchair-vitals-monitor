@@ -131,9 +131,12 @@ _PHRASE: Dict[str, str] = {
     "spo2_min": "lowest accepted blood oxygen {v:.1f}%",
     "skin_temp_mean": "wrist skin temperature {v:.1f} °C",
     "movement_mean": "average movement {v:.2f}",
-    "valid_ratio": "accepted readings {p:.0f}%",
-    "warn_ratio": "readings outside the clinical range {p:.0f}%",
-    "no_reading_ratio": "session without a reading {p:.0f}%",
+    # One vocabulary for the three buckets a reading can land in — normal,
+    # abnormal, withheld — so a recommendation's reasons use the same words as
+    # everything that reports the same numbers.
+    "valid_ratio": "normal readings {p:.0f}%",
+    "warn_ratio": "abnormal readings {p:.0f}%",
+    "no_reading_ratio": "withheld readings {p:.0f}%",
     "immobility_max_min": "longest immobile stretch {v:.0f} min",
     "movement_alerts_per_hour": "movement prompts {v:.1f} per hour",
     "response_min": "response to a movement prompt {v:.1f} min",
