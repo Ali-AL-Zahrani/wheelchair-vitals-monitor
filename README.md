@@ -69,9 +69,14 @@ Both screens on a local server:
 At `--period 0.5` the virtual hour completes in one real minute, so every display state and alert appears in sequence, then the cycle repeats.
 
 ```bash
+python demo_rehab.py
+```
+The rehabilitation model end to end: five users with different baselines and activity patterns, each run through the full pipeline, each with the programme recommended for them and the indicators behind it. Needs `pip install scikit-learn`.
+
+```bash
 python generate_training_data.py
 ```
-Builds the training population for the rehabilitation model, fits it, reports held-out accuracy and the indicators it relies on, and saves the model. Needs `pip install scikit-learn`.
+Builds the training population for the rehabilitation model, fits it, reports held-out accuracy and the indicators it relies on, and saves the model.
 
 ```bash
 python -m pytest -q
@@ -105,6 +110,7 @@ Sensor ⟶ Validator ⟶ Display ⟶ Screen
 | `rehab_model.py` | **The AI layer:** clinical criteria + the classifier that recommends a programme |
 | `generate_training_data.py` | The training population and the training run |
 | `demo.py` | End-to-end terminal run + statistics |
+| `demo_rehab.py` | Five users through the model, with the reasons behind each recommendation |
 | `test_*.py` | Automated proof |
 
 ---
