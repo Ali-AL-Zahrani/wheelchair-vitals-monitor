@@ -78,8 +78,12 @@ def main() -> None:
         print(f"    wrist skin temp        {features['skin_temp_mean']:.1f} °C")
         print(f"    longest immobile       {features['immobility_max_min']:.0f} min")
         print(f"    response to a prompt   {minutes(features['response_min'])}")
-        print(f"    readings accepted      {features['valid_ratio'] * 100:.0f}%"
-              f"    withheld {features['no_reading_ratio'] * 100:.0f}%")
+        # All three buckets, so they visibly add up to the whole session: a
+        # reading is normal, abnormal but real, or withheld. Printing only two
+        # of them leaves a gap that reads as an arithmetic error.
+        print(f"    readings               {features['valid_ratio'] * 100:.0f}% normal"
+              f"   {features['warn_ratio'] * 100:.0f}% abnormal"
+              f"   {features['no_reading_ratio'] * 100:.0f}% withheld")
         print()
         print(f"    ▸ {recommendation.label}   ({recommendation.confidence * 100:.0f}% confidence)")
         for reason in recommendation.reasons:
@@ -101,10 +105,11 @@ def main() -> None:
             f"{features['immobility_max_min']:.0f} min",
             minutes(features["response_min"]),
             f"{features['valid_ratio'] * 100:.0f}%",
+            f"{features['warn_ratio'] * 100:.0f}%",
             f"{recommendation.label.split()[0]} ({recommendation.confidence * 100:.0f}%)",
         ))
 
-    headers = ("User", "Longest immobile", "Response", "Accepted", "Recommendation")
+    headers = ("User", "Longest immobile", "Response", "Normal", "Abnormal", "Recommendation")
     widths = [max(len(headers[c]), max(len(r[c]) for r in rows)) for c in range(len(headers))]
     line = "  ".join("─" * w for w in widths)
 
