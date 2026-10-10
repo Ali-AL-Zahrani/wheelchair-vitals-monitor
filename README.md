@@ -103,7 +103,7 @@ Sensor ⟶ Validator ⟶ Display ⟶ Screen
 | `i2c_sensor.py` | Hardware layer: MAX30102 + MAX30205 + MPU-6050 over I²C |
 | `rehab_features.py` | One session ⟶ the thirteen indicators the model reads |
 | `rehab_model.py` | **The AI layer:** clinical criteria + the classifier that recommends a programme |
-| `generate_training_data.py` | The simulated training population and the training run |
+| `generate_training_data.py` | The training population and the training run |
 | `demo.py` | End-to-end terminal run + statistics |
 | `test_*.py` | Automated proof |
 
