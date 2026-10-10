@@ -281,7 +281,7 @@ class I2CSensor(SensorInterface):
 
 Then replace `MockSensor(...)` with `I2CSensor(...)` in `demo.py` and `screen.py`. **The validator and the screen are untouched.**
 
-A ready implementation for MAX30102 + MAX30205 + MPU-6050 is in `i2c_sensor.py` (requires `pip install smbus2` on the Raspberry Pi). Afterwards `CONTACT_IR_THRESHOLD` and `MOVEMENT_THRESHOLD` need calibrating on the real hardware.
+A ready implementation for MAX30102 + MAX30205 + MPU-6050 is in `i2c_sensor.py` (requires `pip install smbus2` on the Raspberry Pi).
 
 ---
 
